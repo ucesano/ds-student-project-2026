@@ -24,8 +24,6 @@ public class Replica extends AbstractReplica {
   private final Random rnd = new Random();
   private final Map<Long, Cancellable> forwardTimers = new HashMap<>();
   private final Map<UpdateId, Cancellable> writeOkTimers = new HashMap<>();
-  private final Cancellable electionAckTimer = null;
-  private final Cancellable electionGlobalTimer = null;
   // Updates received via UPDATE but not yet committed (awaiting WRITEOK).
   private final Map<UpdateId, Update> proposed = new HashMap<>();
   // Updates already applied to local state (also serves as the dedup set / history).
@@ -36,8 +34,11 @@ public class Replica extends AbstractReplica {
   private final Map<UpdateId, Set<ActorRef>> ackers = new HashMap<>();
   // Coordinator-side epoch/sequence allocation for new updates.
   private final int epoch = 0;
-  private final boolean participating = false;
   private final Set<UpdateId> writeOkSent = new HashSet<>();
+  private final Set<Integer> knownCrashed = new HashSet<>();
+  private Cancellable electionAckTimer = null;
+  private Cancellable electionGlobalTimer = null;
+  private boolean participating = false;
   private Cancellable heartbeatBeatTimer = null;    // coordinator: periodic beat
   private Cancellable heartbeatTimeoutTimer = null; // replica: coordinator liveness
   private long writeReqCounter = 0;
@@ -52,6 +53,11 @@ public class Replica extends AbstractReplica {
   // Most recent update applied (used by the election protocol).
   private UpdateId lastUpdate = null;
   private int nextSeq = 0;
+  private int activeInitiator = -1;          // highest initiator id we are forwarding
+  private UpdateId frozenLastUpdate = null;  // Hint 1: frozen while participating
+  private Election electionInFlight = null;  // last ELECTION we forwarded (for retries)
+  private int electionAckTarget = -1;
+  private boolean awaitingElectionAck = false;
 
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL, Optional.empty());
@@ -347,6 +353,196 @@ public class Replica extends AbstractReplica {
     startElection();
   }
 
+
+  /**
+   * Next replica in the ascending-id ring, skipping ids known to have crashed.
+   */
+  private int successor() {
+    int idx = ringIds.indexOf(this.id);
+    for (int k = 1; k <= ringIds.size(); k++) {
+      int cand = ringIds.get((idx + k) % ringIds.size());
+      if (cand == this.id) {
+        break;
+      }
+      if (!knownCrashed.contains(cand)) {
+        return cand;
+      }
+    }
+    return -1; // everyone else is believed crashed
+  }
+
+  private void enterElection(int crashedCoord) {
+    participating = true;
+    activeInitiator = -1;
+    cancel(heartbeatTimeoutTimer);
+    heartbeatTimeoutTimer = null;
+    knownCrashed.add(crashedCoord);
+    frozenLastUpdate = lastUpdate; // Hint 1: freeze our "most recent update"
+    callbackOnElectionStarted(crashedCoord);
+    cancel(electionGlobalTimer);
+    electionGlobalTimer = schedule(electionGlobalTimeoutDelay(), new ElectionTimeout());
+  }
+
+  /**
+   * Begin a fresh election because we suspect the current coordinator.
+   */
+  private void startElection() {
+    if (crashed || participating) {
+      return;
+    }
+    enterElection(coordinatorId);
+    activeInitiator = this.id;
+    List<Candidate> cands = new ArrayList<>();
+    cands.add(new Candidate(this.id, frozenLastUpdate));
+    sendElectionToSuccessor(new Election(this.id, coordinatorId, cands, false, -1));
+  }
+
+  private void sendElectionToSuccessor(Election e) {
+    int suc = successor();
+    if (suc < 0) {
+      // We are the only survivor we know of: decide right away.
+      int winner = computeWinner(e.candidates);
+      if (winner == this.id) {
+        declareVictory();
+      }
+      return;
+    }
+    cancel(electionAckTimer);
+    electionInFlight = e;
+    electionAckTarget = suc;
+    awaitingElectionAck = true;
+    this.tell(e, group.get(suc));
+    electionAckTimer = schedule(electionAckTimeoutDelay(), new ElectionAckTimeout(suc));
+  }
+
+  private void onElection(Election e) {
+    // Always acknowledge the forwarder so it does not skip us.
+    this.tell(new ElectionAck(), getSender());
+    if (crashed) {
+      return;
+    }
+    // Stale election about a coordinator we have already replaced.
+    if (!participating && coordinatorId != e.crashedCoordinatorId) {
+      return;
+    }
+    if (!participating) {
+      enterElection(e.crashedCoordinatorId);
+    }
+    // Among concurrent elections, keep only the one with the highest initiator id.
+    if (e.initiatorId < activeInitiator) {
+      return;
+    }
+    activeInitiator = e.initiatorId;
+
+    if (e.decided) {
+      if (e.winnerId == this.id) {
+        if (!(isCoordinator && coordinatorId == this.id)) {
+          declareVictory();
+        }
+      } else {
+        sendElectionToSuccessor(e);
+      }
+      return;
+    }
+
+    boolean present = false;
+    for (Candidate c : e.candidates) {
+      if (c.id == this.id) {
+        present = true;
+        break;
+      }
+    }
+
+    if (e.initiatorId == this.id && present) {
+      // The message has gone all the way around the ring: decide the winner.
+      int winner = computeWinner(e.candidates);
+      debug("election complete, winner=" + winner);
+      if (winner == this.id) {
+        declareVictory();
+      } else {
+        sendElectionToSuccessor(new Election(e.initiatorId, e.crashedCoordinatorId, e.candidates, true, winner));
+      }
+    } else if (present) {
+      sendElectionToSuccessor(e);
+    } else {
+      List<Candidate> cands = new ArrayList<>(e.candidates);
+      cands.add(new Candidate(this.id, frozenLastUpdate));
+      sendElectionToSuccessor(new Election(e.initiatorId, e.crashedCoordinatorId, cands, false, -1));
+    }
+  }
+
+  private void onElectionAck(ElectionAck a) {
+    if (awaitingElectionAck && getSender().equals(group.get(electionAckTarget))) {
+      awaitingElectionAck = false;
+      cancel(electionAckTimer);
+    }
+  }
+
+  private void onElectionAckTimeout(ElectionAckTimeout t) {
+    if (crashed || !participating || !awaitingElectionAck || t.target != electionAckTarget) {
+      return;
+    }
+    // The ring successor did not answer: assume it crashed, skip it, try the next one.
+    knownCrashed.add(t.target);
+    awaitingElectionAck = false;
+    if (electionInFlight != null) {
+      sendElectionToSuccessor(electionInFlight);
+    }
+  }
+
+  private void onElectionTimeout(ElectionTimeout t) {
+    if (crashed || !participating) {
+      return;
+    }
+    // The election did not converge (e.g. the best candidate crashed): restart it.
+    log("election timed out, restarting");
+    participating = false;
+    awaitingElectionAck = false;
+    cancel(electionAckTimer);
+    startElection();
+  }
+
+  /**
+   * Picks the most up-to-date alive candidate, breaking ties by highest id.
+   */
+  private int computeWinner(List<Candidate> cands) {
+    Candidate best = null;
+    for (Candidate c : cands) {
+      if (knownCrashed.contains(c.id)) {
+        continue;
+      }
+      if (best == null || isBetter(c, best)) {
+        best = c;
+      }
+    }
+    return best == null ? this.id : best.id;
+  }
+
+  private boolean isBetter(Candidate a, Candidate b) {
+    int cmp = compareUpdate(a.lastUpdate, b.lastUpdate);
+    if (cmp != 0) {
+      return cmp > 0;
+    }
+    return a.id > b.id;
+  }
+
+  private int compareUpdate(UpdateId x, UpdateId y) {
+    if (x == null && y == null) {
+      return 0;
+    }
+    if (x == null) {
+      return -1;
+    }
+    if (y == null) {
+      return 1;
+    }
+    return x.compareTo(y);
+  }
+
+  private void declareVictory() {
+    // TODO: Becoming Coordinator
+  }
+
   @Override
   public void initSystem(InitSystem sysInit) {
     this.group = sysInit.group();
@@ -363,9 +559,6 @@ public class Replica extends AbstractReplica {
     }
   }
 
-  private void startElection() {
-    // TODO: Election System
-  }
 
   private Cancellable schedule(long delayMillis, Serializable msg) {
     return getContext().system().scheduler().scheduleOnce(Duration.create(Math.max(1, delayMillis), TimeUnit.MILLISECONDS), getSelf(), msg, getContext().system().dispatcher(), getSelf());
