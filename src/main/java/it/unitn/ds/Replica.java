@@ -2,6 +2,7 @@ package it.unitn.ds;
 
 import akka.actor.ActorRef;
 import akka.actor.Props;
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -10,6 +11,7 @@ import java.util.Optional;
 
 public class Replica extends AbstractReplica {
 
+  private final int[] positions = new int[POSITIONS_LIST_LENGTH];
   private int n; // Number of actors
   private AbstractReplica.Crash pendingCrash = null;
   private int crashCounter = 0;
@@ -18,7 +20,6 @@ public class Replica extends AbstractReplica {
   private List<Integer> ringIds;
   private int coordinatorId;
   private boolean isCoordinator;
-  private final int[] positions = new int[POSITIONS_LIST_LENGTH];
 
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL, Optional.empty());
@@ -96,5 +97,12 @@ public class Replica extends AbstractReplica {
     return createBaseReceiveBuilder()
         // TODO add your message handlers here .match(, )
         .build();
+  }
+
+  /**
+   * Read request sent by a client to the contacted replica.
+   */
+  public record ClientRead(ActorRef client, int index) implements Serializable {
+
   }
 }
