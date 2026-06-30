@@ -156,4 +156,11 @@ public class Replica extends AbstractReplica {
     record Update(UpdateId id, int index, int value, int originId, ActorRef client, long reqId) implements Serializable {
 
   }
+
+  /**
+   * A candidate in the ring election: a replica and the most recent update it knows.
+   */
+    record Candidate(int id, UpdateId lastUpdate) implements Serializable {
+
+  }
 }
