@@ -14,120 +14,108 @@ import java.time.format.DateTimeFormatter;
 
 public final class Logger {
 
-    public enum Destination {
-        STDOUT,
-        FILE
+  private static final Object LOCK = new Object();
+  private static final DateTimeFormatter FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
+  private static Destination destination = Destination.STDOUT;
+  private static boolean debugEnabled = false;
+  private static boolean loggingEnabled = true;
+  private static Writer writer = new BufferedWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_8));
+  private static Path logPath = null;
+
+  private Logger() {
+  }
+
+  public static void setDestinationStdout() {
+    synchronized (LOCK) {
+      closeWriterIfNeeded();
+      destination = Destination.STDOUT;
+      writer = new BufferedWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_8));
     }
+  }
 
-    private static final Object LOCK = new Object();
-    private static final DateTimeFormatter FORMATTER =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
+  // -------------------------------------------------
+  // Configuration
+  // -------------------------------------------------
 
-    private static Destination destination = Destination.STDOUT;
-    private static boolean debugEnabled = false;
-    private static boolean loggingEnabled = true;
+  public static void setDestinationFile(String filename) {
+    synchronized (LOCK) {
+      closeWriterIfNeeded();
+      try {
+        logPath = Paths.get(filename);
+        Files.deleteIfExists(logPath);
 
-    private static Writer writer =
-            new BufferedWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_8));
+        writer = Files.newBufferedWriter(logPath, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
 
-    private static Path logPath = null;
+        destination = Destination.FILE;
 
-    private Logger() {}
-
-    // -------------------------------------------------
-    // Configuration
-    // -------------------------------------------------
-
-    public static void setDestinationStdout() {
-        synchronized (LOCK) {
-            closeWriterIfNeeded();
-            destination = Destination.STDOUT;
-            writer = new BufferedWriter(
-                    new OutputStreamWriter(System.out, StandardCharsets.UTF_8));
-        }
+      } catch (IOException e) {
+        System.err.println("[Logger] Failed to set file destination: " + e.getMessage());
+        setDestinationStdout();
+      }
     }
+  }
 
-    public static void setDestinationFile(String filename) {
-        synchronized (LOCK) {
-            closeWriterIfNeeded();
-            try {
-                logPath = Paths.get(filename);
-                Files.deleteIfExists(logPath);
+  public static void setDebugEnabled(boolean enabled) {
+    debugEnabled = enabled;
+  }
 
-                writer = Files.newBufferedWriter(
-                        logPath,
-                        StandardCharsets.UTF_8,
-                        StandardOpenOption.CREATE,
-                        StandardOpenOption.APPEND
-                );
+  public static void setLoggingEnabled(boolean enabled) {
+    loggingEnabled = enabled;
+  }
 
-                destination = Destination.FILE;
+  // -------------------------------------------------
+  // Global enable/disable
+  // -------------------------------------------------
 
-            } catch (IOException e) {
-                System.err.println("[Logger] Failed to set file destination: " + e.getMessage());
-                setDestinationStdout();
-            }
-        }
+  public static void disable() {
+    loggingEnabled = false;
+  }
+
+  public static void enable() {
+    loggingEnabled = true;
+  }
+
+  public static void log(String message) {
+    if (!loggingEnabled) {
+      return;
     }
+    write("INFO", message);
+  }
 
-    public static void setDebugEnabled(boolean enabled) {
-        debugEnabled = enabled;
+  // -------------------------------------------------
+  // Logging methods
+  // -------------------------------------------------
+
+  public static void debug(String message) {
+    if (!loggingEnabled || !debugEnabled) {
+      return;
     }
+    write("DEBUG", message);
+  }
 
-    // -------------------------------------------------
-    // Global enable/disable
-    // -------------------------------------------------
+  private static void write(String level, String message) {
+    String line = String.format("%s [%s] %s%s", LocalDateTime.now().format(FORMATTER), level, message, System.lineSeparator());
 
-    public static void setLoggingEnabled(boolean enabled) {
-        loggingEnabled = enabled;
+    synchronized (LOCK) {
+      try {
+        writer.write(line);
+        writer.flush();
+      } catch (IOException e) {
+        System.err.println("[Logger] Failed to write log: " + e.getMessage());
+      }
     }
+  }
 
-    public static void disable() {
-        loggingEnabled = false;
+  private static void closeWriterIfNeeded() {
+    try {
+      if (destination == Destination.FILE && writer != null) {
+        writer.close();
+      }
+    } catch (IOException ignored) {
     }
+  }
 
-    public static void enable() {
-        loggingEnabled = true;
-    }
-
-    // -------------------------------------------------
-    // Logging methods
-    // -------------------------------------------------
-
-    public static void log(String message) {
-        if (!loggingEnabled) return;
-        write("INFO", message);
-    }
-
-    public static void debug(String message) {
-        if (!loggingEnabled || !debugEnabled) return;
-        write("DEBUG", message);
-    }
-
-    private static void write(String level, String message) {
-        String line = String.format(
-                "%s [%s] %s%s",
-                LocalDateTime.now().format(FORMATTER),
-                level,
-                message,
-                System.lineSeparator()
-        );
-
-        synchronized (LOCK) {
-            try {
-                writer.write(line);
-                writer.flush();
-            } catch (IOException e) {
-                System.err.println("[Logger] Failed to write log: " + e.getMessage());
-            }
-        }
-    }
-
-    private static void closeWriterIfNeeded() {
-        try {
-            if (destination == Destination.FILE && writer != null) {
-                writer.close();
-            }
-        } catch (IOException ignored) {}
-    }
+  public enum Destination {
+    STDOUT, FILE
+  }
 }
