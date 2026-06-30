@@ -38,12 +38,6 @@ public class Client extends AbstractClient {
             Optional.ofNullable(listener)));
   }
 
-  private Cancellable schedule(long delayMillis, Serializable msg) {
-    return getContext().system().scheduler()
-        .scheduleOnce(Duration.create(delayMillis, TimeUnit.MILLISECONDS), getSelf(), msg,
-            getContext().system().dispatcher(), getSelf());
-  }
-
   @Override
   public void sendRead(ActorRef replica, int index) {
     log("requesting READ (" + index + ") to " + replica.path().name());
@@ -58,6 +52,12 @@ public class Client extends AbstractClient {
     pendingReads.put(index, new Pending(reqId, c, replica));
   }
 
+  private Cancellable schedule(long delayMillis, Serializable msg) {
+    return getContext().system().scheduler()
+        .scheduleOnce(Duration.create(delayMillis, TimeUnit.MILLISECONDS), getSelf(), msg,
+            getContext().system().dispatcher(), getSelf());
+  }
+
   @Override
   public void sendWrite(ActorRef replica, int index, int value) {
     log("requesting WRITE (" + index + ", " + value + ") to " + replica.path().name());
@@ -70,6 +70,14 @@ public class Client extends AbstractClient {
     Cancellable c = schedule(getWriteTimeoutDelay(),
         new WriteTimeoutMsg(reqId, replica, index, value));
     pendingWrites.put(index, new Pending(reqId, c, replica));
+  }
+
+  @Override
+  public final Receive createReceive() {
+    return createBaseReceiveBuilder().match(ReadResult.class, this::onReadResult)
+        .match(WriteResult.class, this::onWriteResult)
+        .match(ReadTimeoutMsg.class, this::onReadTimeoutMsg)
+        .match(WriteTimeoutMsg.class, this::onWriteTimeoutMsg).build();
   }
 
   private void onReadResult(ReadResult r) {
@@ -106,14 +114,6 @@ public class Client extends AbstractClient {
     }
     pendingWrites.remove(t.index);
     callbackOnWriteTimeout(new WriteTimeout(getSelf(), t.replica, t.index, t.value));
-  }
-
-  @Override
-  public final Receive createReceive() {
-    return createBaseReceiveBuilder().match(ReadResult.class, this::onReadResult)
-        .match(WriteResult.class, this::onWriteResult)
-        .match(ReadTimeoutMsg.class, this::onReadTimeoutMsg)
-        .match(WriteTimeoutMsg.class, this::onWriteTimeoutMsg).build();
   }
 
   private record ReadTimeoutMsg(long reqId, ActorRef replica, int index) implements Serializable {

@@ -86,15 +86,19 @@ public class Replica extends AbstractReplica {
             Optional.ofNullable(listener)));
   }
 
-  private static void cancel(Cancellable c) {
-    if (c != null) {
-      c.cancel();
-    }
-  }
-
   @Override
   public int getSystemNumberOfActors() {
     return n;
+  }
+
+  @Override
+  public void crash(AbstractReplica.Crash how_to_crash) {
+    if (how_to_crash.type() == AbstractReplica.Crash.Type.Now) {
+      goCrashed();
+    } else {
+      this.pendingCrash = how_to_crash;
+      this.crashCounter = 0;
+    }
   }
 
   @Override
@@ -114,10 +118,12 @@ public class Replica extends AbstractReplica {
     }
   }
 
-  private Cancellable schedule(long delayMillis, Serializable msg) {
-    return getContext().system().scheduler()
-        .scheduleOnce(Duration.create(Math.max(1, delayMillis), TimeUnit.MILLISECONDS), getSelf(),
-            msg, getContext().system().dispatcher(), getSelf());
+  private void startHeartbeatBeating() {
+    cancel(heartbeatTimeoutTimer);
+    heartbeatTimeoutTimer = null;
+    cancel(heartbeatBeatTimer);
+    heartbeatBeatTimer = schedulePeriodic(getCoordinatorBeatInterval(),
+        getCoordinatorBeatInterval(), new HeartbeatTick());
   }
 
   private Cancellable schedulePeriodic(long initialMillis, long intervalMillis, Serializable msg) {
@@ -127,42 +133,28 @@ public class Replica extends AbstractReplica {
             getContext().system().dispatcher(), getSelf());
   }
 
+  private void startHeartbeatMonitoring() {
+    cancel(heartbeatBeatTimer);
+    heartbeatBeatTimer = null;
+    resetHeartbeatTimeout();
+  }
+
+  private void resetHeartbeatTimeout() {
+    cancel(heartbeatTimeoutTimer);
+    heartbeatTimeoutTimer = schedule(heartbeatTimeoutDelay(), new HeartbeatTimeout());
+  }
+
+  private Cancellable schedule(long delayMillis, Serializable msg) {
+    return getContext().system().scheduler()
+        .scheduleOnce(Duration.create(Math.max(1, delayMillis), TimeUnit.MILLISECONDS), getSelf(),
+            msg, getContext().system().dispatcher(), getSelf());
+  }
+
   private long heartbeatTimeoutDelay() {
     // ~2 missed beats + network tolerance, with a little jitter so that not all
     // replicas suspect the coordinator at exactly the same instant.
     return 2L * getCoordinatorBeatInterval() + getMaxLatencyPlusTolerance() + rnd.nextInt(
         getMaxLatency() * Math.max(1, n) + 1);
-  }
-
-  private long updateTimeoutDelay() {
-    // Comfortably larger than a full 2PC round so an alive coordinator never trips it.
-    return 4L * getMaxLatencyPlusTolerance();
-  }
-
-  private long electionAckTimeoutDelay() {
-    return 2L * getMaxLatencyPlusTolerance();
-  }
-
-  private long electionGlobalTimeoutDelay() {
-    return 2L * n * electionAckTimeoutDelay() + 2L * getCoordinatorBeatInterval();
-  }
-
-  @Override
-  public void crash(AbstractReplica.Crash how_to_crash) {
-    if (how_to_crash.type() == AbstractReplica.Crash.Type.Now) {
-      goCrashed();
-    } else {
-      this.pendingCrash = how_to_crash;
-      this.crashCounter = 0;
-    }
-  }
-
-  /**
-   * Behavior of a crashed node: it ignores everything and sends nothing.
-   */
-  private Receive crashedReceive() {
-    return receiveBuilder().matchAny(m -> {
-    }).build();
   }
 
   private void goCrashed() {
@@ -184,6 +176,33 @@ public class Replica extends AbstractReplica {
       cancel(c);
     }
     writeOkTimers.clear();
+  }
+
+  private static void cancel(Cancellable c) {
+    if (c != null) {
+      c.cancel();
+    }
+  }
+
+  /**
+   * Behavior of a crashed node: it ignores everything and sends nothing.
+   */
+  private Receive crashedReceive() {
+    return receiveBuilder().matchAny(m -> {
+    }).build();
+  }
+
+  private long updateTimeoutDelay() {
+    // Comfortably larger than a full 2PC round so an alive coordinator never trips it.
+    return 4L * getMaxLatencyPlusTolerance();
+  }
+
+  private long electionAckTimeoutDelay() {
+    return 2L * getMaxLatencyPlusTolerance();
+  }
+
+  private long electionGlobalTimeoutDelay() {
+    return 2L * n * electionAckTimeoutDelay() + 2L * getCoordinatorBeatInterval();
   }
 
   private boolean crashTriggered(AbstractReplica.Crash.Type type) {
@@ -352,25 +371,6 @@ public class Replica extends AbstractReplica {
       return; // unknown / already applied
     }
     applyUpdate(u);
-  }
-
-  private void startHeartbeatBeating() {
-    cancel(heartbeatTimeoutTimer);
-    heartbeatTimeoutTimer = null;
-    cancel(heartbeatBeatTimer);
-    heartbeatBeatTimer = schedulePeriodic(getCoordinatorBeatInterval(),
-        getCoordinatorBeatInterval(), new HeartbeatTick());
-  }
-
-  private void startHeartbeatMonitoring() {
-    cancel(heartbeatBeatTimer);
-    heartbeatBeatTimer = null;
-    resetHeartbeatTimeout();
-  }
-
-  private void resetHeartbeatTimeout() {
-    cancel(heartbeatTimeoutTimer);
-    heartbeatTimeoutTimer = schedule(heartbeatTimeoutDelay(), new HeartbeatTimeout());
   }
 
   private void onHeartbeatTick(HeartbeatTick t) {
