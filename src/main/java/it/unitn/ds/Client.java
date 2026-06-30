@@ -12,6 +12,7 @@ public class Client extends AbstractClient {
 
   private final Map<Integer, Pending> pendingReads = new HashMap<>();
   private final Map<Integer, Pending> pendingWrites = new HashMap<>();
+  private long reqCounter = 0;
 
   Client(long readTimeoutDelay, long writeTimeoutDelay, Optional<ActorRef> defaultTargetReplica, Optional<ActorRef> listener) {
     super(readTimeoutDelay, writeTimeoutDelay, listener, defaultTargetReplica);
