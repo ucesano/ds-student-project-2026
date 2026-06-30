@@ -115,7 +115,34 @@ public class Replica extends AbstractReplica {
   /**
    * Write request sent by a client to the contacted replica.
    */
-    public record ClientWrite(ActorRef client, int index, int value) implements Serializable {
+  public record ClientWrite(ActorRef client, int index, int value) implements Serializable {
 
+  }
+
+  /**
+   * Immutable identifier of an update: the pair {@code <epoch, sequence>}. Used as a map key for the update history and to compare recency.
+   */
+  public record UpdateId(int epoch, int seq) implements Serializable, Comparable<UpdateId> {
+
+    @Override
+    public int compareTo(UpdateId o) {
+      if (this.epoch != o.epoch) {
+        return Integer.compare(this.epoch, o.epoch);
+      }
+      return Integer.compare(this.seq, o.seq);
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+      if (obj instanceof UpdateId o) {
+        return o.epoch == this.epoch && o.seq == this.seq;
+      }
+      return false;
+    }
+
+    @Override
+    public String toString() {
+      return epoch + ":" + seq;
+    }
   }
 }
