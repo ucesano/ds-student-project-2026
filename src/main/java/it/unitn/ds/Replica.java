@@ -103,6 +103,12 @@ public class Replica extends AbstractReplica {
     // TODO: heartbeat layer
   }
 
+  private static void cancel(Cancellable c) {
+    if (c != null) {
+      c.cancel();
+    }
+  }
+
   @Override
   public final Receive createReceive() {
     return createBaseReceiveBuilder()
