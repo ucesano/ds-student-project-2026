@@ -10,7 +10,7 @@ public class Replica extends AbstractReplica {
   private int n; // Number of actors
   private AbstractReplica.Crash pendingCrash = null;
   private int crashCounter = 0;
-  private boolean crashed = false;
+  private final boolean crashed = false;
 
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL, Optional.empty());
@@ -43,6 +43,14 @@ public class Replica extends AbstractReplica {
       this.pendingCrash = how_to_crash;
       this.crashCounter = 0;
     }
+  }
+
+  /**
+   * Behavior of a crashed node: it ignores everything and sends nothing.
+   */
+  private Receive crashedReceive() {
+    return receiveBuilder().matchAny(m -> {
+    }).build();
   }
 
   @Override
