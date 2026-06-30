@@ -18,6 +18,7 @@ public class Replica extends AbstractReplica {
   private List<Integer> ringIds;
   private int coordinatorId;
   private boolean isCoordinator;
+  private final int[] positions = new int[POSITIONS_LIST_LENGTH];
 
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL, Optional.empty());
