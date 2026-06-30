@@ -1,6 +1,7 @@
 package it.unitn.ds;
 
 import akka.actor.ActorRef;
+import akka.actor.Cancellable;
 import akka.actor.Props;
 
 import java.util.Optional;
@@ -35,6 +36,11 @@ public class Client extends AbstractClient {
     return createBaseReceiveBuilder()
         // TODO add your message handlers here .match(, )
         .build();
+  }
+
+  // A request awaiting an answer from the system.
+  private record Pending(long reqId, Cancellable timeout, ActorRef replica) {
+
   }
 
 }
