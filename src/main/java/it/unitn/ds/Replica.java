@@ -7,6 +7,8 @@ import java.util.Optional;
 
 public class Replica extends AbstractReplica {
 
+  int n; // Number of actors
+
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL, Optional.empty());
   }
@@ -27,8 +29,7 @@ public class Replica extends AbstractReplica {
 
   @Override
   public int getSystemNumberOfActors() {
-    // TODO: implement
-    return 0;
+    return n;
   }
 
   @Override
@@ -47,5 +48,4 @@ public class Replica extends AbstractReplica {
         // TODO add your message handlers here .match(, )
         .build();
   }
-
 }
