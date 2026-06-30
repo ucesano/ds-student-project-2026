@@ -9,10 +9,12 @@ import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import scala.concurrent.duration.Duration;
 
@@ -43,6 +45,11 @@ public class Replica extends AbstractReplica {
   // Most recent update applied (used by the election protocol).
   private UpdateId lastUpdate = null;
   private final long writeReqCounter = 0;
+  // Coordinator-side quorum tracking: distinct ackers per update.
+  private final Map<UpdateId, Set<ActorRef>> ackers = new HashMap<>();
+  // Coordinator-side epoch/sequence allocation for new updates.
+  private int epoch = 0;
+  private int nextSeq = 0;
 
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL, Optional.empty());
@@ -163,6 +170,16 @@ public class Replica extends AbstractReplica {
       pendingWrites.remove(u.reqId);
       cancel(forwardTimers.remove(u.reqId));
     }
+  }
+
+  /** Coordinator: allocate an id for the write and start phase 1. */
+  private void coordinatorBeginUpdate(ActorRef client, int originId, int index, int value, long reqId) {
+    UpdateId uid = new UpdateId(epoch, nextSeq++);
+    Update u = new Update(uid, index, value, originId, client, reqId);
+    proposed.put(uid, u);
+    ackers.put(uid, new HashSet<>());
+    debug("coordinator proposing update " + uid + " (" + index + ", " + value + ")");
+    broadcast(u);
   }
 
   @Override
