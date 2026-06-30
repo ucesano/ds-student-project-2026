@@ -111,4 +111,11 @@ public class Replica extends AbstractReplica {
   public record ClientRead(ActorRef client, int index) implements Serializable {
 
   }
+
+  /**
+   * Write request sent by a client to the contacted replica.
+   */
+    public record ClientWrite(ActorRef client, int index, int value) implements Serializable {
+
+  }
 }
