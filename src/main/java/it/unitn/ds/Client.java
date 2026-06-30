@@ -60,7 +60,16 @@ public class Client extends AbstractClient {
 
   @Override
   public void sendWrite(ActorRef replica, int index, int value) {
-    // TODO: implement
+    log("requesting WRITE (" + index + ", " + value + ") to " + replica.path().name());
+    Pending old = pendingWrites.remove(index);
+    if (old != null) {
+      old.timeout.cancel();
+    }
+    long reqId = ++reqCounter;
+    replica.tell(new Replica.ClientWrite(getSelf(), index, value), getSelf());
+    Cancellable c = schedule(getWriteTimeoutDelay(),
+        new WriteTimeoutMsg(reqId, replica, index, value));
+    pendingWrites.put(index, new Pending(reqId, c, replica));
   }
 
   @Override
@@ -83,6 +92,4 @@ public class Client extends AbstractClient {
       Serializable {
 
   }
-}
-
 }
