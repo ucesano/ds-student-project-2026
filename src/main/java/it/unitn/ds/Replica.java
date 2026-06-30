@@ -2,6 +2,7 @@ package it.unitn.ds;
 
 import akka.actor.ActorRef;
 import akka.actor.Props;
+import it.unitn.ds.AbstractClient.ReadResult;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -97,6 +98,11 @@ public class Replica extends AbstractReplica {
     return createBaseReceiveBuilder()
         // TODO add your message handlers here .match(, )
         .build();
+  }
+
+  private void onClientRead(ClientRead m) {
+    debug("READ (" + m.index + ") from client " + m.client.path().name());
+    this.tell(new ReadResult(true, m.index, positions[m.index], this.id), m.client);
   }
 
   /**
