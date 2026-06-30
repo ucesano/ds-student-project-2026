@@ -134,8 +134,8 @@ public class Replica extends AbstractReplica {
 
     @Override
     public boolean equals(Object obj) {
-      if (obj instanceof UpdateId o) {
-        return o.epoch == this.epoch && o.seq == this.seq;
+      if (obj instanceof UpdateId(int epoch1, int seq1)) {
+        return epoch1 == this.epoch && seq1 == this.seq;
       }
       return false;
     }
@@ -153,14 +153,33 @@ public class Replica extends AbstractReplica {
    * @param client   client to answer once the update commits
    * @param reqId    origin-local request id, to match the client request
    */
-    record Update(UpdateId id, int index, int value, int originId, ActorRef client, long reqId) implements Serializable {
+  record Update(UpdateId id, int index, int value, int originId, ActorRef client, long reqId) implements Serializable {
 
   }
 
   /**
    * A candidate in the ring election: a replica and the most recent update it knows.
    */
-    record Candidate(int id, UpdateId lastUpdate) implements Serializable {
+  record Candidate(int id, UpdateId lastUpdate) implements Serializable {
 
+  }
+
+  /**
+   * A client write this replica is responsible for answering (it was contacted).
+   */
+  private static class PendingWrite {
+
+    final long reqId;
+    final ActorRef client;
+    final int index;
+    final int value;
+    UpdateId assignedId; // set once the coordinator has bound the write to an <e,i>
+
+    PendingWrite(long reqId, ActorRef client, int index, int value) {
+      this.reqId = reqId;
+      this.client = client;
+      this.index = index;
+      this.value = value;
+    }
   }
 }
