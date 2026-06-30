@@ -164,37 +164,50 @@ public class Replica extends AbstractReplica {
   /**
    * Contacted-replica self-message: the coordinator did not start the update.
    */
-    record ForwardTimeout(long reqId) implements Serializable {
+  record ForwardTimeout(long reqId) implements Serializable {
 
   }
 
   /**
    * Replica self-message: no WRITEOK arrived after an UPDATE.
    */
-    record WriteOkTimeout(UpdateId id) implements Serializable {
+  record WriteOkTimeout(UpdateId id) implements Serializable {
 
   }
 
   /**
    * Ring election message carrying the candidates and their latest updates.
    */
-    record Election(int initiatorId, int crashedCoordinatorId, List<Candidate> candidates, boolean decided, int winnerId) implements Serializable {
+  record Election(int initiatorId, int crashedCoordinatorId, List<Candidate> candidates, boolean decided, int winnerId) implements Serializable {
 
   }
 
-  /** Acknowledgment of an ELECTION message to its forwarder. */
+  /**
+   * Acknowledgment of an ELECTION message to its forwarder.
+   */
   static class ElectionAck implements Serializable {
+
   }
 
   /**
    * Forwarder self-message: the ring successor did not acknowledge in time.
    */
-    record ElectionAckTimeout(int target) implements Serializable {
+  record ElectionAckTimeout(int target) implements Serializable {
 
   }
 
-  /** Self-message: the whole election took too long; restart it (termination). */
+  /**
+   * Self-message: the whole election took too long; restart it (termination).
+   */
   static class ElectionTimeout implements Serializable {
+
+  }
+
+  /**
+   * New coordinator announcement, carrying any updates needed to converge.
+   */
+  record Synchronization(int newCoordinatorId, int newEpoch, List<Update> history) implements Serializable {
+
   }
 
   /**
