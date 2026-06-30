@@ -8,6 +8,7 @@ import it.unitn.ds.AbstractClient.WriteResult;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -33,7 +34,7 @@ public class Replica extends AbstractReplica {
   // Coordinator-side quorum tracking: distinct ackers per update.
   private final Map<UpdateId, Set<ActorRef>> ackers = new HashMap<>();
   // Coordinator-side epoch/sequence allocation for new updates.
-  private final int epoch = 0;
+  private int epoch = 0;
   private final Set<UpdateId> writeOkSent = new HashSet<>();
   private final Set<Integer> knownCrashed = new HashSet<>();
   private Cancellable electionAckTimer = null;
@@ -540,7 +541,43 @@ public class Replica extends AbstractReplica {
   }
 
   private void declareVictory() {
-    // TODO: Becoming Coordinator
+    participating = false;
+    awaitingElectionAck = false;
+    cancel(electionAckTimer);
+    cancel(electionGlobalTimer);
+
+    this.isCoordinator = true;
+    this.coordinatorId = this.id;
+
+    // Hint 3 (uniform agreement): complete any update we observed without a WRITEOK
+    // so that nothing a quorum may have applied is lost.
+    List<Update> incomplete = new ArrayList<>(proposed.values());
+    incomplete.sort(Comparator.comparing(x -> x.id));
+    for (Update u : incomplete) {
+      applyUpdate(u);
+    }
+    proposed.clear();
+
+    // Open a new epoch.
+    int base = (lastUpdate == null) ? 0 : lastUpdate.epoch;
+    this.epoch = base + 1;
+    this.nextSeq = 0;
+
+    log("won election, becoming coordinator (epoch " + epoch + ")");
+    callbackOnCoordinatorElected(this.id);
+
+    List<Update> hist = new ArrayList<>(history.values());
+    hist.sort(Comparator.comparing(x -> x.id));
+    broadcastToOthers(new Synchronization(this.id, this.epoch, hist));
+
+    startHeartbeatBeating();
+
+    // Resume client writes that were waiting for a coordinator.
+    for (PendingWrite pw : new ArrayList<>(pendingWrites.values())) {
+      if (pw.assignedId == null) {
+        coordinatorBeginUpdate(pw.client, this.id, pw.index, pw.value, pw.reqId);
+      }
+    }
   }
 
   @Override
