@@ -26,8 +26,6 @@ public class Replica extends AbstractReplica {
   private final Map<UpdateId, Cancellable> writeOkTimers = new HashMap<>();
   private final Cancellable electionAckTimer = null;
   private final Cancellable electionGlobalTimer = null;
-  private final Cancellable heartbeatBeatTimer = null;    // coordinator: periodic beat
-  private final Cancellable heartbeatTimeoutTimer = null; // replica: coordinator liveness
   // Updates received via UPDATE but not yet committed (awaiting WRITEOK).
   private final Map<UpdateId, Update> proposed = new HashMap<>();
   // Updates already applied to local state (also serves as the dedup set / history).
@@ -40,6 +38,8 @@ public class Replica extends AbstractReplica {
   private final int epoch = 0;
   private final boolean participating = false;
   private final Set<UpdateId> writeOkSent = new HashSet<>();
+  private Cancellable heartbeatBeatTimer = null;    // coordinator: periodic beat
+  private Cancellable heartbeatTimeoutTimer = null; // replica: coordinator liveness
   private long writeReqCounter = 0;
   private int n; // Number of actors
   private AbstractReplica.Crash pendingCrash = null;
@@ -279,6 +279,74 @@ public class Replica extends AbstractReplica {
     applyUpdate(u);
   }
 
+  private void startHeartbeatBeating() {
+    cancel(heartbeatTimeoutTimer);
+    heartbeatTimeoutTimer = null;
+    cancel(heartbeatBeatTimer);
+    heartbeatBeatTimer = schedulePeriodic(getCoordinatorBeatInterval(), getCoordinatorBeatInterval(), new HeartbeatTick());
+  }
+
+  private void startHeartbeatMonitoring() {
+    cancel(heartbeatBeatTimer);
+    heartbeatBeatTimer = null;
+    resetHeartbeatTimeout();
+  }
+
+  private void resetHeartbeatTimeout() {
+    cancel(heartbeatTimeoutTimer);
+    heartbeatTimeoutTimer = schedule(heartbeatTimeoutDelay(), new HeartbeatTimeout());
+  }
+
+  private void onHeartbeatTick(HeartbeatTick t) {
+    if (!isCoordinator) {
+      return;
+    }
+    if (crashTriggered(AbstractReplica.Crash.Type.Heartbeat)) {
+      return; // coordinator crashes after sending heartbeats
+    }
+    broadcastToOthers(new Heartbeat());
+  }
+
+  private void onHeartbeat(Heartbeat h) {
+    if (isCoordinator || participating) {
+      return;
+    }
+    resetHeartbeatTimeout();
+  }
+
+  private void onHeartbeatTimeout(HeartbeatTimeout t) {
+    if (crashed || participating || isCoordinator) {
+      return;
+    }
+    log("coordinator " + coordinatorId + " suspected (no heartbeat)");
+    startElection();
+  }
+
+  private void onForwardTimeout(ForwardTimeout t) {
+    forwardTimers.remove(t.reqId);
+    if (crashed || participating) {
+      return;
+    }
+    PendingWrite pw = pendingWrites.get(t.reqId);
+    if (pw == null || pw.assignedId != null) {
+      return; // already taken charge of
+    }
+    log("coordinator " + coordinatorId + " suspected (no UPDATE after forward)");
+    startElection();
+  }
+
+  private void onWriteOkTimeout(WriteOkTimeout t) {
+    writeOkTimers.remove(t.id);
+    if (crashed || participating) {
+      return;
+    }
+    if (history.containsKey(t.id) || !proposed.containsKey(t.id)) {
+      return; // already applied
+    }
+    log("coordinator " + coordinatorId + " suspected (no WRITEOK after UPDATE)");
+    startElection();
+  }
+
   @Override
   public void initSystem(InitSystem sysInit) {
     this.group = sysInit.group();
@@ -295,20 +363,16 @@ public class Replica extends AbstractReplica {
     }
   }
 
+  private void startElection() {
+    // TODO: Election System
+  }
+
   private Cancellable schedule(long delayMillis, Serializable msg) {
     return getContext().system().scheduler().scheduleOnce(Duration.create(Math.max(1, delayMillis), TimeUnit.MILLISECONDS), getSelf(), msg, getContext().system().dispatcher(), getSelf());
   }
 
   private Cancellable schedulePeriodic(long initialMillis, long intervalMillis, Serializable msg) {
     return getContext().system().scheduler().scheduleWithFixedDelay(Duration.create(Math.max(1, initialMillis), TimeUnit.MILLISECONDS), Duration.create(Math.max(1, intervalMillis), TimeUnit.MILLISECONDS), getSelf(), msg, getContext().system().dispatcher(), getSelf());
-  }
-
-  private void startHeartbeatBeating() {
-    // TODO: heartbeat layer
-  }
-
-  private void startHeartbeatMonitoring() {
-    // TODO: heartbeat layer
   }
 
   private long heartbeatTimeoutDelay() {
