@@ -145,4 +145,15 @@ public class Replica extends AbstractReplica {
       return epoch + ":" + seq;
     }
   }
+
+  /**
+   * An update record, broadcast by the coordinator and stored by every replica.
+   *
+   * @param originId id of the replica contacted by the client
+   * @param client   client to answer once the update commits
+   * @param reqId    origin-local request id, to match the client request
+   */
+    record Update(UpdateId id, int index, int value, int originId, ActorRef client, long reqId) implements Serializable {
+
+  }
 }
