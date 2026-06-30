@@ -129,14 +129,35 @@ public class Replica extends AbstractReplica {
   /**
    * Phase-1 acknowledgment from a replica to the coordinator.
    */
-    record Ack(UpdateId id) implements Serializable {
+  record Ack(UpdateId id) implements Serializable {
 
   }
 
   /**
    * Phase-2 confirmation: replicas apply the update on reception.
    */
-    record WriteOk(UpdateId id) implements Serializable {
+  record WriteOk(UpdateId id) implements Serializable {
+
+  }
+
+  /**
+   * Coordinator self-tick that triggers a heartbeat broadcast.
+   */
+  static class HeartbeatTick implements Serializable {
+
+  }
+
+  /**
+   * Liveness beacon broadcast by the coordinator to all replicas.
+   */
+  static class Heartbeat implements Serializable {
+
+  }
+
+  /**
+   * Replica self-message: the coordinator was not heard for too long.
+   */
+  static class HeartbeatTimeout implements Serializable {
 
   }
 
