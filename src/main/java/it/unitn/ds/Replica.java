@@ -8,7 +8,6 @@ import it.unitn.ds.AbstractClient.WriteResult;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -21,44 +20,48 @@ import scala.concurrent.duration.Duration;
 
 public class Replica extends AbstractReplica {
 
+
   private final int[] positions = new int[POSITIONS_LIST_LENGTH];
-  private final Random rnd = new Random();
-  private final Map<Long, Cancellable> forwardTimers = new HashMap<>();
-  private final Map<UpdateId, Cancellable> writeOkTimers = new HashMap<>();
   // Updates received via UPDATE but not yet committed (awaiting WRITEOK).
   private final Map<UpdateId, Update> proposed = new HashMap<>();
   // Updates already applied to local state (also serves as the dedup set / history).
   private final Map<UpdateId, Update> history = new HashMap<>();
-  // Writes this replica was contacted for and still owes an answer to the client.
-  private final Map<Long, PendingWrite> pendingWrites = new HashMap<>();
   // Coordinator-side quorum tracking: distinct ackers per update.
   private final Map<UpdateId, Set<ActorRef>> ackers = new HashMap<>();
   private final Set<UpdateId> writeOkSent = new HashSet<>();
+  // Writes this replica was contacted for and still owes an answer to the client.
+  private final Map<Long, PendingWrite> pendingWrites = new HashMap<>();
+  private final Map<Long, Cancellable> forwardTimers = new HashMap<>();
+  private final Map<UpdateId, Cancellable> writeOkTimers = new HashMap<>();
   private final Set<Integer> knownCrashed = new HashSet<>();
+  private final Random rnd = new Random();
+  private Map<Integer, ActorRef> group;
+  private List<Integer> ringIds;     // replica ids sorted ascending (the ring)
+  private int coordinatorId;
+  private boolean isCoordinator;
+  private int n;
   // Coordinator-side epoch/sequence allocation for new updates.
   private int epoch = 0;
-  private Cancellable electionAckTimer = null;
-  private Cancellable electionGlobalTimer = null;
-  private boolean participating = false;
-  private Cancellable heartbeatBeatTimer = null;    // coordinator: periodic beat
-  private Cancellable heartbeatTimeoutTimer = null; // replica: coordinator liveness
+  private int nextSeq = 0;
+  // Most recent update applied (used by the election protocol).
+  private UpdateId lastUpdate = null;
   private long writeReqCounter = 0;
-  private int n; // Number of actors
+  // === Crash control ===
   private AbstractReplica.Crash pendingCrash = null;
   private int crashCounter = 0;
   private boolean crashed = false;
-  private Map<Integer, ActorRef> group;
-  private List<Integer> ringIds;
-  private int coordinatorId;
-  private boolean isCoordinator;
-  // Most recent update applied (used by the election protocol).
-  private UpdateId lastUpdate = null;
-  private int nextSeq = 0;
+  // === Failure detection timers ===
+  private Cancellable heartbeatBeatTimer = null;    // coordinator: periodic beat
+  private Cancellable heartbeatTimeoutTimer = null; // replica: coordinator liveness
+  // === Election state ===
+  private boolean participating = false;
   private int activeInitiator = -1;          // highest initiator id we are forwarding
   private UpdateId frozenLastUpdate = null;  // Hint 1: frozen while participating
   private Election electionInFlight = null;  // last ELECTION we forwarded (for retries)
   private int electionAckTarget = -1;
   private boolean awaitingElectionAck = false;
+  private Cancellable electionAckTimer = null;
+  private Cancellable electionGlobalTimer = null;
 
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY,
@@ -95,6 +98,56 @@ public class Replica extends AbstractReplica {
   }
 
   @Override
+  public void initSystem(InitSystem sysInit) {
+    this.group = sysInit.group();
+    this.coordinatorId = sysInit.coordinator_id();
+    this.n = group.size();
+    this.isCoordinator = (this.id == this.coordinatorId);
+    this.ringIds = new ArrayList<>(group.keySet());
+    Collections.sort(this.ringIds);
+    debug("initialised: n=" + n + " coordinator=" + coordinatorId + " isCoordinator="
+        + isCoordinator);
+    if (isCoordinator) {
+      startHeartbeatBeating();
+    } else {
+      startHeartbeatMonitoring();
+    }
+  }
+
+  private Cancellable schedule(long delayMillis, Serializable msg) {
+    return getContext().system().scheduler()
+        .scheduleOnce(Duration.create(Math.max(1, delayMillis), TimeUnit.MILLISECONDS), getSelf(),
+            msg, getContext().system().dispatcher(), getSelf());
+  }
+
+  private Cancellable schedulePeriodic(long initialMillis, long intervalMillis, Serializable msg) {
+    return getContext().system().scheduler()
+        .scheduleWithFixedDelay(Duration.create(Math.max(1, initialMillis), TimeUnit.MILLISECONDS),
+            Duration.create(Math.max(1, intervalMillis), TimeUnit.MILLISECONDS), getSelf(), msg,
+            getContext().system().dispatcher(), getSelf());
+  }
+
+  private long heartbeatTimeoutDelay() {
+    // ~2 missed beats + network tolerance, with a little jitter so that not all
+    // replicas suspect the coordinator at exactly the same instant.
+    return 2L * getCoordinatorBeatInterval() + getMaxLatencyPlusTolerance() + rnd.nextInt(
+        getMaxLatency() * Math.max(1, n) + 1);
+  }
+
+  private long updateTimeoutDelay() {
+    // Comfortably larger than a full 2PC round so an alive coordinator never trips it.
+    return 4L * getMaxLatencyPlusTolerance();
+  }
+
+  private long electionAckTimeoutDelay() {
+    return 2L * getMaxLatencyPlusTolerance();
+  }
+
+  private long electionGlobalTimeoutDelay() {
+    return 2L * n * electionAckTimeoutDelay() + 2L * getCoordinatorBeatInterval();
+  }
+
+  @Override
   public void crash(AbstractReplica.Crash how_to_crash) {
     if (how_to_crash.type() == AbstractReplica.Crash.Type.Now) {
       goCrashed();
@@ -112,6 +165,12 @@ public class Replica extends AbstractReplica {
     }).build();
   }
 
+  private void goCrashed() {
+    this.crashed = true;
+    cancelAllTimers();
+    getContext().become(crashedReceive());
+  }
+
   private void cancelAllTimers() {
     cancel(heartbeatBeatTimer);
     cancel(heartbeatTimeoutTimer);
@@ -125,12 +184,6 @@ public class Replica extends AbstractReplica {
       cancel(c);
     }
     writeOkTimers.clear();
-  }
-
-  private void goCrashed() {
-    this.crashed = true;
-    cancelAllTimers();
-    getContext().become(crashedReceive());
   }
 
   private boolean crashTriggered(AbstractReplica.Crash.Type type) {
@@ -188,17 +241,20 @@ public class Replica extends AbstractReplica {
     }
   }
 
-  /**
-   * Coordinator: allocate an id for the write and start phase 1.
-   */
-  private void coordinatorBeginUpdate(ActorRef client, int originId, int index, int value,
-      long reqId) {
-    UpdateId uid = new UpdateId(epoch, nextSeq++);
-    Update u = new Update(uid, index, value, originId, client, reqId);
-    proposed.put(uid, u);
-    ackers.put(uid, new HashSet<>());
-    debug("coordinator proposing update " + uid + " (" + index + ", " + value + ")");
-    broadcast(u);
+  private void onClientRead(ClientRead m) {
+    debug("READ (" + m.index + ") from client " + m.client.path().name());
+    this.tell(new ReadResult(true, m.index, positions[m.index], this.id), m.client);
+  }
+
+  private void onClientWrite(ClientWrite m) {
+    debug("WRITE (" + m.index + ", " + m.value + ") from client " + m.client.path().name());
+    long reqId = ++writeReqCounter;
+    pendingWrites.put(reqId, new PendingWrite(reqId, m.client, m.index, m.value));
+    if (participating) {
+      // Election in progress: buffer the write and resume once a coordinator exists.
+      return;
+    }
+    dispatchWrite(reqId);
   }
 
   /**
@@ -219,21 +275,24 @@ public class Replica extends AbstractReplica {
     }
   }
 
-  private void onClientWrite(ClientWrite m) {
-    debug("WRITE (" + m.index + ", " + m.value + ") from client " + m.client.path().name());
-    long reqId = ++writeReqCounter;
-    pendingWrites.put(reqId, new PendingWrite(reqId, m.client, m.index, m.value));
-    if (participating) {
-      return; // Election in progress: buffer the write and resume once a coordinator exists.
-    }
-    dispatchWrite(reqId);
-  }
-
   private void onWriteForward(WriteForward f) {
     if (!isCoordinator || participating) {
       return; // not the coordinator (anymore): ignore stale forward
     }
     coordinatorBeginUpdate(f.client, f.originId, f.index, f.value, f.reqId);
+  }
+
+  /**
+   * Coordinator: allocate an id for the write and start phase 1.
+   */
+  private void coordinatorBeginUpdate(ActorRef client, int originId, int index, int value,
+      long reqId) {
+    UpdateId uid = new UpdateId(epoch, nextSeq++);
+    Update u = new Update(uid, index, value, originId, client, reqId);
+    proposed.put(uid, u);
+    ackers.put(uid, new HashSet<>());
+    debug("coordinator proposing update " + uid + " (" + index + ", " + value + ")");
+    broadcast(u);
   }
 
   /**
@@ -364,7 +423,6 @@ public class Replica extends AbstractReplica {
     startElection();
   }
 
-
   /**
    * Next replica in the ascending-id ring, skipping ids known to have crashed.
    */
@@ -409,8 +467,8 @@ public class Replica extends AbstractReplica {
   }
 
   private void sendElectionToSuccessor(Election e) {
-    int suc = successor();
-    if (suc < 0) {
+    int succ = successor();
+    if (succ < 0) {
       // We are the only survivor we know of: decide right away.
       int winner = computeWinner(e.candidates);
       if (winner == this.id) {
@@ -420,10 +478,10 @@ public class Replica extends AbstractReplica {
     }
     cancel(electionAckTimer);
     electionInFlight = e;
-    electionAckTarget = suc;
+    electionAckTarget = succ;
     awaitingElectionAck = true;
-    this.tell(e, group.get(suc));
-    electionAckTimer = schedule(electionAckTimeoutDelay(), new ElectionAckTimeout(suc));
+    this.tell(e, group.get(succ));
+    electionAckTimer = schedule(electionAckTimeoutDelay(), new ElectionAckTimeout(succ));
   }
 
   private void onElection(Election e) {
@@ -564,7 +622,7 @@ public class Replica extends AbstractReplica {
     // Hint 3 (uniform agreement): complete any update we observed without a WRITEOK
     // so that nothing a quorum may have applied is lost.
     List<Update> incomplete = new ArrayList<>(proposed.values());
-    incomplete.sort(Comparator.comparing(x -> x.id));
+    incomplete.sort((x, y) -> x.id.compareTo(y.id));
     for (Update u : incomplete) {
       applyUpdate(u);
     }
@@ -579,7 +637,7 @@ public class Replica extends AbstractReplica {
     callbackOnCoordinatorElected(this.id);
 
     List<Update> hist = new ArrayList<>(history.values());
-    hist.sort(Comparator.comparing(x -> x.id));
+    hist.sort((x, y) -> x.id.compareTo(y.id));
     broadcastToOthers(new Synchronization(this.id, this.epoch, hist));
 
     startHeartbeatBeating();
@@ -628,57 +686,6 @@ public class Replica extends AbstractReplica {
   }
 
   @Override
-  public void initSystem(InitSystem sysInit) {
-    this.group = sysInit.group();
-    this.coordinatorId = sysInit.coordinator_id();
-    this.n = group.size();
-    this.isCoordinator = (this.id == this.coordinatorId);
-    this.ringIds = new ArrayList<>(group.keySet());
-    Collections.sort(this.ringIds);
-    debug("initialised: n=" + n + " coordinator=" + coordinatorId + " isCoordinator="
-        + isCoordinator);
-    if (isCoordinator) {
-      startHeartbeatBeating();
-    } else {
-      startHeartbeatMonitoring();
-    }
-  }
-
-
-  private Cancellable schedule(long delayMillis, Serializable msg) {
-    return getContext().system().scheduler()
-        .scheduleOnce(Duration.create(Math.max(1, delayMillis), TimeUnit.MILLISECONDS), getSelf(),
-            msg, getContext().system().dispatcher(), getSelf());
-  }
-
-  private Cancellable schedulePeriodic(long initialMillis, long intervalMillis, Serializable msg) {
-    return getContext().system().scheduler()
-        .scheduleWithFixedDelay(Duration.create(Math.max(1, initialMillis), TimeUnit.MILLISECONDS),
-            Duration.create(Math.max(1, intervalMillis), TimeUnit.MILLISECONDS), getSelf(), msg,
-            getContext().system().dispatcher(), getSelf());
-  }
-
-  private long heartbeatTimeoutDelay() {
-    // ~2 missed beats + network tolerance, with a little jitter so that not all
-    // replicas suspect the coordinator at exactly the same instant.
-    return 2L * getCoordinatorBeatInterval() + getMaxLatencyPlusTolerance() + rnd.nextInt(
-        getMaxLatency() * Math.max(1, n) + 1);
-  }
-
-  private long updateTimeoutDelay() {
-    // Comfortably larger than a full 2PC round so an alive coordinator never trips it.
-    return 4L * getMaxLatencyPlusTolerance();
-  }
-
-  private long electionAckTimeoutDelay() {
-    return 2L * getMaxLatencyPlusTolerance();
-  }
-
-  private long electionGlobalTimeoutDelay() {
-    return 2L * n * electionAckTimeoutDelay() + 2L * getCoordinatorBeatInterval();
-  }
-
-  @Override
   public final Receive createReceive() {
     return createBaseReceiveBuilder().match(ClientRead.class, this::onClientRead)
         .match(ClientWrite.class, this::onClientWrite)
@@ -694,23 +701,100 @@ public class Replica extends AbstractReplica {
         .match(Synchronization.class, this::onSynchronization).build();
   }
 
-  private void onClientRead(ClientRead m) {
-    debug("READ (" + m.index + ") from client " + m.client.path().name());
-    this.tell(new ReadResult(true, m.index, positions[m.index], this.id), m.client);
+  /**
+   * Immutable identifier of an update: the pair {@code <epoch, sequence>}. Used as a map key for
+   * the update history and to compare recency.
+   */
+  public record UpdateId(int epoch, int seq) implements Serializable, Comparable<UpdateId> {
+
+    @Override
+    public int compareTo(UpdateId o) {
+      if (this.epoch != o.epoch) {
+        return Integer.compare(this.epoch, o.epoch);
+      }
+      return Integer.compare(this.seq, o.seq);
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+      if (obj instanceof UpdateId(int epoch1, int seq1)) {
+        return epoch1 == this.epoch && seq1 == this.seq;
+      }
+      return false;
+    }
+
+    @Override
+    public String toString() {
+      return epoch + ":" + seq;
+    }
+  }
+
+  /**
+   * An update record, broadcast by the coordinator and stored by every replica.
+   *
+   * @param originId id of the replica contacted by the client
+   * @param client   client to answer once the update commits
+   * @param reqId    origin-local request id, to match the client request
+   */
+  record Update(UpdateId id, int index, int value, int originId, ActorRef client,
+                long reqId) implements Serializable {
+
+  }
+
+  /**
+   * A candidate in the ring election: a replica and the most recent update it knows.
+   */
+  record Candidate(int id, UpdateId lastUpdate) implements Serializable {
+
+  }
+
+  /**
+   * A client write this replica is responsible for answering (it was contacted).
+   */
+  private static class PendingWrite {
+
+    final long reqId;
+    final ActorRef client;
+    final int index;
+    final int value;
+    UpdateId assignedId; // set once the coordinator has bound the write to an <e,i>
+
+    PendingWrite(long reqId, ActorRef client, int index, int value) {
+      this.reqId = reqId;
+      this.client = client;
+      this.index = index;
+      this.value = value;
+    }
   }
 
   /**
    * Read request sent by a client to the contacted replica.
    */
-  public record ClientRead(ActorRef client, int index) implements Serializable {
+  public static class ClientRead implements Serializable {
 
+    final ActorRef client;
+    final int index;
+
+    public ClientRead(ActorRef client, int index) {
+      this.client = client;
+      this.index = index;
+    }
   }
 
   /**
    * Write request sent by a client to the contacted replica.
    */
-  public record ClientWrite(ActorRef client, int index, int value) implements Serializable {
+  public static class ClientWrite implements Serializable {
 
+    final ActorRef client;
+    final int index;
+    final int value;
+
+    public ClientWrite(ActorRef client, int index, int value) {
+      this.client = client;
+      this.index = index;
+      this.value = value;
+    }
   }
 
   /**
@@ -807,69 +891,4 @@ public class Replica extends AbstractReplica {
 
   }
 
-  /**
-   * Immutable identifier of an update: the pair {@code <epoch, sequence>}. Used as a map key for
-   * the update history and to compare recency.
-   */
-  public record UpdateId(int epoch, int seq) implements Serializable, Comparable<UpdateId> {
-
-    @Override
-    public int compareTo(UpdateId o) {
-      if (this.epoch != o.epoch) {
-        return Integer.compare(this.epoch, o.epoch);
-      }
-      return Integer.compare(this.seq, o.seq);
-    }
-
-    @Override
-    public boolean equals(Object obj) {
-      if (obj instanceof UpdateId(int epoch1, int seq1)) {
-        return epoch1 == this.epoch && seq1 == this.seq;
-      }
-      return false;
-    }
-
-    @Override
-    public String toString() {
-      return epoch + ":" + seq;
-    }
-  }
-
-  /**
-   * An update record, broadcast by the coordinator and stored by every replica.
-   *
-   * @param originId id of the replica contacted by the client
-   * @param client   client to answer once the update commits
-   * @param reqId    origin-local request id, to match the client request
-   */
-  record Update(UpdateId id, int index, int value, int originId, ActorRef client,
-                long reqId) implements Serializable {
-
-  }
-
-  /**
-   * A candidate in the ring election: a replica and the most recent update it knows.
-   */
-  record Candidate(int id, UpdateId lastUpdate) implements Serializable {
-
-  }
-
-  /**
-   * A client write this replica is responsible for answering (it was contacted).
-   */
-  private static class PendingWrite {
-
-    final long reqId;
-    final ActorRef client;
-    final int index;
-    final int value;
-    UpdateId assignedId; // set once the coordinator has bound the write to an <e,i>
-
-    PendingWrite(long reqId, ActorRef client, int index, int value) {
-      this.reqId = reqId;
-      this.client = client;
-      this.index = index;
-      this.value = value;
-    }
-  }
 }
