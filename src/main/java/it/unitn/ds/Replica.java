@@ -38,6 +38,7 @@ public class Replica extends AbstractReplica {
   private final Map<UpdateId, Set<ActorRef>> ackers = new HashMap<>();
   // Coordinator-side epoch/sequence allocation for new updates.
   private final int epoch = 0;
+  private final boolean participating = false;
   private long writeReqCounter = 0;
   private int n; // Number of actors
   private AbstractReplica.Crash pendingCrash = null;
@@ -50,7 +51,6 @@ public class Replica extends AbstractReplica {
   // Most recent update applied (used by the election protocol).
   private UpdateId lastUpdate = null;
   private int nextSeq = 0;
-  private final boolean participating = false;
 
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL, Optional.empty());
@@ -217,6 +217,31 @@ public class Replica extends AbstractReplica {
       return; // not the coordinator (anymore): ignore stale forward
     }
     coordinatorBeginUpdate(f.client, f.originId, f.index, f.value, f.reqId);
+  }
+
+  /**
+   * Every replica: store the proposed update and acknowledge the coordinator.
+   */
+  private void onUpdate(Update u) {
+    if (participating) {
+      return; // ignore stragglers while electing
+    }
+    if (crashTriggered(AbstractReplica.Crash.Type.Update)) {
+      return; // crash "after receiving an UPDATE": do not ack
+    }
+    proposed.put(u.id, u);
+    this.tell(new Ack(u.id), getSender());
+    if (u.originId == this.id) {
+      PendingWrite pw = pendingWrites.get(u.reqId);
+      if (pw != null) {
+        pw.assignedId = u.id; // the coordinator has taken charge of our write
+        cancel(forwardTimers.remove(u.reqId));
+      }
+    }
+    if (!isCoordinator) {
+      cancel(writeOkTimers.remove(u.id));
+      writeOkTimers.put(u.id, schedule(updateTimeoutDelay(), new WriteOkTimeout(u.id)));
+    }
   }
 
   @Override
