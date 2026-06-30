@@ -10,12 +10,14 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import scala.concurrent.duration.Duration;
 
 public class Replica extends AbstractReplica {
 
   private final int[] positions = new int[POSITIONS_LIST_LENGTH];
+  private final Random rnd = new Random();
   private int n; // Number of actors
   private AbstractReplica.Crash pendingCrash = null;
   private int crashCounter = 0;
@@ -40,6 +42,12 @@ public class Replica extends AbstractReplica {
   // Props method for automated tests
   public static Props propsWithListener(int id, int minLatency, int maxLatency, int coordinatorBeatInterval, ActorRef listener) {
     return Props.create(Replica.class, () -> new Replica(id, minLatency, maxLatency, coordinatorBeatInterval, Optional.ofNullable(listener)));
+  }
+
+  private static void cancel(Cancellable c) {
+    if (c != null) {
+      c.cancel();
+    }
   }
 
   @Override
@@ -103,10 +111,23 @@ public class Replica extends AbstractReplica {
     // TODO: heartbeat layer
   }
 
-  private static void cancel(Cancellable c) {
-    if (c != null) {
-      c.cancel();
-    }
+  private long heartbeatTimeoutDelay() {
+    // ~2 missed beats + network tolerance, with a little jitter so that not all
+    // replicas suspect the coordinator at exactly the same instant.
+    return 2L * getCoordinatorBeatInterval() + getMaxLatencyPlusTolerance() + rnd.nextInt(getMaxLatency() * Math.max(1, n) + 1);
+  }
+
+  private long updateTimeoutDelay() {
+    // Comfortably larger than a full 2PC round so an alive coordinator never trips it.
+    return 4L * getMaxLatencyPlusTolerance();
+  }
+
+  private long electionAckTimeoutDelay() {
+    return 2L * getMaxLatencyPlusTolerance();
+  }
+
+  private long electionGlobalTimeoutDelay() {
+    return 2L * n * electionAckTimeoutDelay() + 2L * getCoordinatorBeatInterval();
   }
 
   @Override
