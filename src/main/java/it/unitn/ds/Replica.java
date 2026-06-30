@@ -7,6 +7,7 @@ import it.unitn.ds.AbstractClient.ReadResult;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -18,6 +19,8 @@ public class Replica extends AbstractReplica {
 
   private final int[] positions = new int[POSITIONS_LIST_LENGTH];
   private final Random rnd = new Random();
+  private final Map<Long, Cancellable> forwardTimers = new HashMap<>();
+  private final Map<UpdateId, Cancellable> writeOkTimers = new HashMap<>();
   private int n; // Number of actors
   private AbstractReplica.Crash pendingCrash = null;
   private int crashCounter = 0;
@@ -26,6 +29,10 @@ public class Replica extends AbstractReplica {
   private List<Integer> ringIds;
   private int coordinatorId;
   private boolean isCoordinator;
+  private final Cancellable electionAckTimer = null;
+  private final Cancellable electionGlobalTimer = null;
+  private final Cancellable heartbeatBeatTimer = null;    // coordinator: periodic beat
+  private final Cancellable heartbeatTimeoutTimer = null; // replica: coordinator liveness
 
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL, Optional.empty());
@@ -73,9 +80,24 @@ public class Replica extends AbstractReplica {
     }).build();
   }
 
+  private void cancelAllTimers() {
+    cancel(heartbeatBeatTimer);
+    cancel(heartbeatTimeoutTimer);
+    cancel(electionAckTimer);
+    cancel(electionGlobalTimer);
+    for (Cancellable c : forwardTimers.values()) {
+      cancel(c);
+    }
+    forwardTimers.clear();
+    for (Cancellable c : writeOkTimers.values()) {
+      cancel(c);
+    }
+    writeOkTimers.clear();
+  }
+
   private void goCrashed() {
     this.crashed = true;
-    // TODO: implement timers (here->cancelAll)
+    cancelAllTimers();
     getContext().become(crashedReceive());
   }
 
