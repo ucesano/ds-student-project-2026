@@ -15,28 +15,47 @@ public class Client extends AbstractClient {
 
   private final Map<Integer, Pending> pendingReads = new HashMap<>();
   private final Map<Integer, Pending> pendingWrites = new HashMap<>();
-  private final long reqCounter = 0;
+  private long reqCounter = 0;
 
-  Client(long readTimeoutDelay, long writeTimeoutDelay, Optional<ActorRef> defaultTargetReplica, Optional<ActorRef> listener) {
+  Client(long readTimeoutDelay, long writeTimeoutDelay, Optional<ActorRef> defaultTargetReplica,
+      Optional<ActorRef> listener) {
     super(readTimeoutDelay, writeTimeoutDelay, listener, defaultTargetReplica);
   }
 
-  public static Props props(long readTimeoutDelay, long writeTimeoutDelay, Optional<ActorRef> defaultTargetReplica) {
-    return Props.create(Client.class, () -> new Client(readTimeoutDelay, writeTimeoutDelay, defaultTargetReplica, Optional.empty()));
+  public static Props props(long readTimeoutDelay, long writeTimeoutDelay,
+      Optional<ActorRef> defaultTargetReplica) {
+    return Props.create(Client.class,
+        () -> new Client(readTimeoutDelay, writeTimeoutDelay, defaultTargetReplica,
+            Optional.empty()));
   }
 
   // Props method for automated tests
-  public static Props propsWithListener(long readTimeoutDelay, long writeTimeoutDelay, Optional<ActorRef> defaultTargetReplica, ActorRef listener) {
-    return Props.create(Client.class, () -> new Client(readTimeoutDelay, writeTimeoutDelay, defaultTargetReplica, Optional.ofNullable(listener)));
+  public static Props propsWithListener(long readTimeoutDelay, long writeTimeoutDelay,
+      Optional<ActorRef> defaultTargetReplica, ActorRef listener) {
+    return Props.create(Client.class,
+        () -> new Client(readTimeoutDelay, writeTimeoutDelay, defaultTargetReplica,
+            Optional.ofNullable(listener)));
   }
 
   private Cancellable schedule(long delayMillis, Serializable msg) {
-    return getContext().system().scheduler().scheduleOnce(Duration.create(delayMillis, TimeUnit.MILLISECONDS), getSelf(), msg, getContext().system().dispatcher(), getSelf());
+    return getContext().system().scheduler()
+        .scheduleOnce(Duration.create(delayMillis, TimeUnit.MILLISECONDS), getSelf(), msg,
+            getContext().system().dispatcher(), getSelf());
   }
 
   @Override
   public void sendRead(ActorRef replica, int index) {
-    // TODO: implement
+    log("requesting READ (" + index + ") to " + replica.path().name());
+    // Cancel any previous outstanding read for this index before rescheduling
+    // (see slide 23: never reschedule onto a live Cancellable).
+    Pending old = pendingReads.remove(index);
+    if (old != null) {
+      old.timeout.cancel();
+    }
+    long reqId = ++reqCounter;
+    replica.tell(new Replica.ClientRead(getSelf(), index), getSelf());
+    Cancellable c = schedule(getReadTimeoutDelay(), new ReadTimeoutMsg(reqId, replica, index));
+    pendingReads.put(index, new Pending(reqId, c, replica));
   }
 
   @Override
@@ -55,5 +74,15 @@ public class Client extends AbstractClient {
   private record Pending(long reqId, Cancellable timeout, ActorRef replica) {
 
   }
+
+  private record ReadTimeoutMsg(long reqId, ActorRef replica, int index) implements Serializable {
+
+  }
+
+  private record WriteTimeoutMsg(long reqId, ActorRef replica, int index, int value) implements
+      Serializable {
+
+  }
+}
 
 }
