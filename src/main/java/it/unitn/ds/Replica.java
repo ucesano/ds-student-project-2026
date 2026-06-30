@@ -127,6 +127,20 @@ public class Replica extends AbstractReplica {
   }
 
   /**
+   * Phase-1 acknowledgment from a replica to the coordinator.
+   */
+    record Ack(UpdateId id) implements Serializable {
+
+  }
+
+  /**
+   * Phase-2 confirmation: replicas apply the update on reception.
+   */
+    record WriteOk(UpdateId id) implements Serializable {
+
+  }
+
+  /**
    * Immutable identifier of an update: the pair {@code <epoch, sequence>}. Used as a map key for the update history and to compare recency.
    */
   public record UpdateId(int epoch, int seq) implements Serializable, Comparable<UpdateId> {
