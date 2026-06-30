@@ -10,7 +10,7 @@ public class Replica extends AbstractReplica {
   private int n; // Number of actors
   private AbstractReplica.Crash pendingCrash = null;
   private int crashCounter = 0;
-  private final boolean crashed = false;
+  private boolean crashed = false;
 
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL, Optional.empty());
@@ -38,7 +38,7 @@ public class Replica extends AbstractReplica {
   @Override
   public void crash(AbstractReplica.Crash how_to_crash) {
     if (how_to_crash.type() == AbstractReplica.Crash.Type.Now) {
-      // TODO: implement
+      goCrashed();
     } else {
       this.pendingCrash = how_to_crash;
       this.crashCounter = 0;
@@ -51,6 +51,12 @@ public class Replica extends AbstractReplica {
   private Receive crashedReceive() {
     return receiveBuilder().matchAny(m -> {
     }).build();
+  }
+
+  private void goCrashed() {
+    this.crashed = true;
+    // TODO: implement timers (here->cancelAll)
+    getContext().become(crashedReceive());
   }
 
   @Override
