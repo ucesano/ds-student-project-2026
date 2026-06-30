@@ -2,7 +2,10 @@ package it.unitn.ds;
 
 import akka.actor.ActorRef;
 import akka.actor.Props;
-
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 public class Replica extends AbstractReplica {
@@ -11,6 +14,10 @@ public class Replica extends AbstractReplica {
   private AbstractReplica.Crash pendingCrash = null;
   private int crashCounter = 0;
   private boolean crashed = false;
+  private Map<Integer, ActorRef> group;
+  private List<Integer> ringIds;
+  private int coordinatorId;
+  private boolean isCoordinator;
 
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL, Optional.empty());
@@ -61,7 +68,26 @@ public class Replica extends AbstractReplica {
 
   @Override
   public void initSystem(InitSystem sysInit) {
-    // TODO: implement
+    this.group = sysInit.group();
+    this.coordinatorId = sysInit.coordinator_id();
+    this.n = group.size();
+    this.isCoordinator = (this.id == this.coordinatorId);
+    this.ringIds = new ArrayList<>(group.keySet());
+    Collections.sort(this.ringIds);
+    debug("initialised: n=" + n + " coordinator=" + coordinatorId + " isCoordinator=" + isCoordinator);
+    if (isCoordinator) {
+      startHeartbeatBeating();
+    } else {
+      startHeartbeatMonitoring();
+    }
+  }
+
+  private void startHeartbeatBeating() {
+    // TODO: heartbeat layer
+  }
+
+  private void startHeartbeatMonitoring() {
+    // TODO: heartbeat layer
   }
 
   @Override
