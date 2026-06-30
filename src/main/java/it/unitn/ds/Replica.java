@@ -120,6 +120,13 @@ public class Replica extends AbstractReplica {
   }
 
   /**
+   * Write request forwarded by the contacted replica to the coordinator.
+   */
+  record WriteForward(ActorRef client, int originId, int index, int value, long reqId) implements Serializable {
+
+  }
+
+  /**
    * Immutable identifier of an update: the pair {@code <epoch, sequence>}. Used as a map key for the update history and to compare recency.
    */
   public record UpdateId(int epoch, int seq) implements Serializable, Comparable<UpdateId> {
