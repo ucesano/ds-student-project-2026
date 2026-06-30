@@ -101,6 +101,19 @@ public class Replica extends AbstractReplica {
     getContext().become(crashedReceive());
   }
 
+  private boolean crashTriggered(AbstractReplica.Crash.Type type) {
+    if (pendingCrash == null || pendingCrash.type() != type) {
+      return false;
+    }
+    crashCounter++;
+    if (crashCounter >= pendingCrash.after_n_messages_of_type()) {
+      log("CRASHED");
+      goCrashed();
+      return true;
+    }
+    return false;
+  }
+
   @Override
   public void initSystem(InitSystem sysInit) {
     this.group = sysInit.group();
