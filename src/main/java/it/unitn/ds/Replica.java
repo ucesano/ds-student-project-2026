@@ -39,6 +39,7 @@ public class Replica extends AbstractReplica {
   // Coordinator-side epoch/sequence allocation for new updates.
   private final int epoch = 0;
   private final boolean participating = false;
+  private final Set<UpdateId> writeOkSent = new HashSet<>();
   private long writeReqCounter = 0;
   private int n; // Number of actors
   private AbstractReplica.Crash pendingCrash = null;
@@ -242,6 +243,40 @@ public class Replica extends AbstractReplica {
       cancel(writeOkTimers.remove(u.id));
       writeOkTimers.put(u.id, schedule(updateTimeoutDelay(), new WriteOkTimeout(u.id)));
     }
+  }
+
+  /**
+   * Coordinator: count acks and broadcast WRITEOK once a quorum is reached.
+   */
+  private void onAck(Ack a) {
+    if (participating) {
+      return;
+    }
+    Set<ActorRef> s = ackers.get(a.id);
+    if (s == null) {
+      return; // update already confirmed
+    }
+    s.add(getSender());
+    if (s.size() >= quorum() && !writeOkSent.contains(a.id)) {
+      writeOkSent.add(a.id);
+      ackers.remove(a.id);
+      debug("quorum reached for " + a.id + ", broadcasting WRITEOK");
+      broadcast(new WriteOk(a.id));
+    }
+  }
+
+  /**
+   * Every replica: apply the update (once) and, if origin, answer the client.
+   */
+  private void onWriteOk(WriteOk w) {
+    if (crashTriggered(AbstractReplica.Crash.Type.WriteOK)) {
+      return; // crash during/after WRITEOK dissemination
+    }
+    Update u = proposed.get(w.id);
+    if (u == null) {
+      return; // unknown / already applied
+    }
+    applyUpdate(u);
   }
 
   @Override
