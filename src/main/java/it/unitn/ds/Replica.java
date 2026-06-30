@@ -162,6 +162,20 @@ public class Replica extends AbstractReplica {
   }
 
   /**
+   * Contacted-replica self-message: the coordinator did not start the update.
+   */
+    record ForwardTimeout(long reqId) implements Serializable {
+
+  }
+
+  /**
+   * Replica self-message: no WRITEOK arrived after an UPDATE.
+   */
+    record WriteOkTimeout(UpdateId id) implements Serializable {
+
+  }
+
+  /**
    * Immutable identifier of an update: the pair {@code <epoch, sequence>}. Used as a map key for the update history and to compare recency.
    */
   public record UpdateId(int epoch, int seq) implements Serializable, Comparable<UpdateId> {
