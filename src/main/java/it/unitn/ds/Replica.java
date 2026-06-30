@@ -91,6 +91,10 @@ public class Replica extends AbstractReplica {
     return getContext().system().scheduler().scheduleOnce(Duration.create(Math.max(1, delayMillis), TimeUnit.MILLISECONDS), getSelf(), msg, getContext().system().dispatcher(), getSelf());
   }
 
+  private Cancellable schedulePeriodic(long initialMillis, long intervalMillis, Serializable msg) {
+    return getContext().system().scheduler().scheduleWithFixedDelay(Duration.create(Math.max(1, initialMillis), TimeUnit.MILLISECONDS), Duration.create(Math.max(1, intervalMillis), TimeUnit.MILLISECONDS), getSelf(), msg, getContext().system().dispatcher(), getSelf());
+  }
+
   private void startHeartbeatBeating() {
     // TODO: heartbeat layer
   }
