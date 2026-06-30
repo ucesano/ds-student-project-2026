@@ -7,7 +7,8 @@ import java.util.Optional;
 
 public class Replica extends AbstractReplica {
 
-  int n; // Number of actors
+  private int n; // Number of actors
+
 
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL, Optional.empty());
