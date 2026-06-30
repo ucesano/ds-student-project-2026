@@ -10,6 +10,7 @@ public class Replica extends AbstractReplica {
   private int n; // Number of actors
   private AbstractReplica.Crash pendingCrash = null;
   private int crashCounter = 0;
+  private boolean crashed = false;
 
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL, Optional.empty());
