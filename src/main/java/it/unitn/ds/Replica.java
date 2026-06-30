@@ -176,6 +176,13 @@ public class Replica extends AbstractReplica {
   }
 
   /**
+   * Ring election message carrying the candidates and their latest updates.
+   */
+    record Election(int initiatorId, int crashedCoordinatorId, List<Candidate> candidates, boolean decided, int winnerId) implements Serializable {
+
+  }
+
+  /**
    * Immutable identifier of an update: the pair {@code <epoch, sequence>}. Used as a map key for the update history and to compare recency.
    */
   public record UpdateId(int epoch, int seq) implements Serializable, Comparable<UpdateId> {
