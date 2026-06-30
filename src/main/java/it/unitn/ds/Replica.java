@@ -34,6 +34,11 @@ public class Replica extends AbstractReplica {
   private final Map<UpdateId, Update> history = new HashMap<>();
   // Writes this replica was contacted for and still owes an answer to the client.
   private final Map<Long, PendingWrite> pendingWrites = new HashMap<>();
+  // Coordinator-side quorum tracking: distinct ackers per update.
+  private final Map<UpdateId, Set<ActorRef>> ackers = new HashMap<>();
+  // Coordinator-side epoch/sequence allocation for new updates.
+  private final int epoch = 0;
+  private long writeReqCounter = 0;
   private int n; // Number of actors
   private AbstractReplica.Crash pendingCrash = null;
   private int crashCounter = 0;
@@ -44,12 +49,8 @@ public class Replica extends AbstractReplica {
   private boolean isCoordinator;
   // Most recent update applied (used by the election protocol).
   private UpdateId lastUpdate = null;
-  private final long writeReqCounter = 0;
-  // Coordinator-side quorum tracking: distinct ackers per update.
-  private final Map<UpdateId, Set<ActorRef>> ackers = new HashMap<>();
-  // Coordinator-side epoch/sequence allocation for new updates.
-  private int epoch = 0;
   private int nextSeq = 0;
+  private final boolean participating = false;
 
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL, Optional.empty());
@@ -172,7 +173,9 @@ public class Replica extends AbstractReplica {
     }
   }
 
-  /** Coordinator: allocate an id for the write and start phase 1. */
+  /**
+   * Coordinator: allocate an id for the write and start phase 1.
+   */
   private void coordinatorBeginUpdate(ActorRef client, int originId, int index, int value, long reqId) {
     UpdateId uid = new UpdateId(epoch, nextSeq++);
     Update u = new Update(uid, index, value, originId, client, reqId);
@@ -180,6 +183,40 @@ public class Replica extends AbstractReplica {
     ackers.put(uid, new HashSet<>());
     debug("coordinator proposing update " + uid + " (" + index + ", " + value + ")");
     broadcast(u);
+  }
+
+  /**
+   * Send a buffered write to the current coordinator (or process it if we are it).
+   */
+  private void dispatchWrite(long reqId) {
+    PendingWrite pw = pendingWrites.get(reqId);
+    if (pw == null) {
+      return;
+    }
+    if (isCoordinator) {
+      coordinatorBeginUpdate(pw.client, this.id, pw.index, pw.value, pw.reqId);
+    } else {
+      this.tell(new WriteForward(pw.client, this.id, pw.index, pw.value, pw.reqId), group.get(coordinatorId));
+      cancel(forwardTimers.remove(reqId));
+      forwardTimers.put(reqId, schedule(updateTimeoutDelay(), new ForwardTimeout(reqId)));
+    }
+  }
+
+  private void onClientWrite(ClientWrite m) {
+    debug("WRITE (" + m.index + ", " + m.value + ") from client " + m.client.path().name());
+    long reqId = ++writeReqCounter;
+    pendingWrites.put(reqId, new PendingWrite(reqId, m.client, m.index, m.value));
+    if (participating) {
+      return; // Election in progress: buffer the write and resume once a coordinator exists.
+    }
+    dispatchWrite(reqId);
+  }
+
+  private void onWriteForward(WriteForward f) {
+    if (!isCoordinator || participating) {
+      return; // not the coordinator (anymore): ignore stale forward
+    }
+    coordinatorBeginUpdate(f.client, f.originId, f.index, f.value, f.reqId);
   }
 
   @Override
