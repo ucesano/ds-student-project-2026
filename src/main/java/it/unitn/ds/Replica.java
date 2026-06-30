@@ -4,6 +4,7 @@ import akka.actor.ActorRef;
 import akka.actor.Cancellable;
 import akka.actor.Props;
 import it.unitn.ds.AbstractClient.ReadResult;
+import it.unitn.ds.AbstractClient.WriteResult;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -21,6 +22,16 @@ public class Replica extends AbstractReplica {
   private final Random rnd = new Random();
   private final Map<Long, Cancellable> forwardTimers = new HashMap<>();
   private final Map<UpdateId, Cancellable> writeOkTimers = new HashMap<>();
+  private final Cancellable electionAckTimer = null;
+  private final Cancellable electionGlobalTimer = null;
+  private final Cancellable heartbeatBeatTimer = null;    // coordinator: periodic beat
+  private final Cancellable heartbeatTimeoutTimer = null; // replica: coordinator liveness
+  // Updates received via UPDATE but not yet committed (awaiting WRITEOK).
+  private final Map<UpdateId, Update> proposed = new HashMap<>();
+  // Updates already applied to local state (also serves as the dedup set / history).
+  private final Map<UpdateId, Update> history = new HashMap<>();
+  // Writes this replica was contacted for and still owes an answer to the client.
+  private final Map<Long, PendingWrite> pendingWrites = new HashMap<>();
   private int n; // Number of actors
   private AbstractReplica.Crash pendingCrash = null;
   private int crashCounter = 0;
@@ -29,10 +40,9 @@ public class Replica extends AbstractReplica {
   private List<Integer> ringIds;
   private int coordinatorId;
   private boolean isCoordinator;
-  private final Cancellable electionAckTimer = null;
-  private final Cancellable electionGlobalTimer = null;
-  private final Cancellable heartbeatBeatTimer = null;    // coordinator: periodic beat
-  private final Cancellable heartbeatTimeoutTimer = null; // replica: coordinator liveness
+  // Most recent update applied (used by the election protocol).
+  private UpdateId lastUpdate = null;
+  private final long writeReqCounter = 0;
 
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL, Optional.empty());
@@ -129,6 +139,29 @@ public class Replica extends AbstractReplica {
       if (e.getKey() != this.id) {
         this.tell(msg, e.getValue());
       }
+    }
+  }
+
+  /**
+   * Applies a committed update to local state (idempotently) and, if this replica was the one contacted by the client, answers that client.
+   */
+  private void applyUpdate(Update u) {
+    if (history.containsKey(u.id)) {
+      return; // never deliver the same update twice
+    }
+    proposed.remove(u.id);
+    cancel(writeOkTimers.remove(u.id));
+    positions[u.index] = u.value;
+    history.put(u.id, u);
+    if (lastUpdate == null || u.id.compareTo(lastUpdate) > 0) {
+      lastUpdate = u.id;
+    }
+    log("applied update " + u.id + " (" + u.index + ", " + u.value + ")");
+    callbackOnUpdateApplied(u.index, u.value);
+    if (u.originId == this.id && u.client != null) {
+      this.tell(new WriteResult(true, u.index, u.value, this.id), u.client);
+      pendingWrites.remove(u.reqId);
+      cancel(forwardTimers.remove(u.reqId));
     }
   }
 
