@@ -4,9 +4,13 @@ import akka.actor.ActorRef;
 import akka.actor.Cancellable;
 import akka.actor.Props;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 
 public class Client extends AbstractClient {
+
+  private final Map<Integer, Pending> pendingReads = new HashMap<>();
 
   Client(long readTimeoutDelay, long writeTimeoutDelay, Optional<ActorRef> defaultTargetReplica, Optional<ActorRef> listener) {
     super(readTimeoutDelay, writeTimeoutDelay, listener, defaultTargetReplica);
