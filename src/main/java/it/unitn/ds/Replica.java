@@ -182,6 +182,21 @@ public class Replica extends AbstractReplica {
 
   }
 
+  /** Acknowledgment of an ELECTION message to its forwarder. */
+  static class ElectionAck implements Serializable {
+  }
+
+  /**
+   * Forwarder self-message: the ring successor did not acknowledge in time.
+   */
+    record ElectionAckTimeout(int target) implements Serializable {
+
+  }
+
+  /** Self-message: the whole election took too long; restart it (termination). */
+  static class ElectionTimeout implements Serializable {
+  }
+
   /**
    * Immutable identifier of an update: the pair {@code <epoch, sequence>}. Used as a map key for the update history and to compare recency.
    */
