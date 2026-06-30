@@ -8,7 +8,8 @@ import java.util.Optional;
 public class Replica extends AbstractReplica {
 
   private int n; // Number of actors
-
+  private AbstractReplica.Crash pendingCrash = null;
+  private int crashCounter = 0;
 
   public Replica(int id) {
     this(id, AbstractReplica.MIN_LATENCY, AbstractReplica.MAX_LATENCY, AbstractReplica.COORDINATOR_BEAT_INTERVAL, Optional.empty());
@@ -35,7 +36,12 @@ public class Replica extends AbstractReplica {
 
   @Override
   public void crash(AbstractReplica.Crash how_to_crash) {
-    // TODO: implement
+    if (how_to_crash.type() == AbstractReplica.Crash.Type.Now) {
+      // TODO: implement
+    } else {
+      this.pendingCrash = how_to_crash;
+      this.crashCounter = 0;
+    }
   }
 
   @Override
