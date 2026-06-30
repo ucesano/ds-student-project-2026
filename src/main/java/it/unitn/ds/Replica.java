@@ -1,6 +1,7 @@
 package it.unitn.ds;
 
 import akka.actor.ActorRef;
+import akka.actor.Cancellable;
 import akka.actor.Props;
 import it.unitn.ds.AbstractClient.ReadResult;
 import java.io.Serializable;
@@ -9,6 +10,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
+import scala.concurrent.duration.Duration;
 
 public class Replica extends AbstractReplica {
 
@@ -28,7 +31,6 @@ public class Replica extends AbstractReplica {
 
   public Replica(int id, int minLatency, int maxLatency, int coordinatorBeatInterval, Optional<ActorRef> listener) {
     super(id, minLatency, maxLatency, coordinatorBeatInterval, listener);
-    // TODO: implement
   }
 
   public static Props props(int id, int minLatency, int maxLatency, int coordinatorBeatInterval) {
@@ -83,6 +85,10 @@ public class Replica extends AbstractReplica {
     } else {
       startHeartbeatMonitoring();
     }
+  }
+
+  private Cancellable schedule(long delayMillis, Serializable msg) {
+    return getContext().system().scheduler().scheduleOnce(Duration.create(Math.max(1, delayMillis), TimeUnit.MILLISECONDS), getSelf(), msg, getContext().system().dispatcher(), getSelf());
   }
 
   private void startHeartbeatBeating() {
