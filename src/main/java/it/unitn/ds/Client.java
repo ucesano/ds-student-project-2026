@@ -9,6 +9,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+
 import scala.concurrent.duration.Duration;
 
 public class Client extends AbstractClient {
@@ -47,7 +48,6 @@ public class Client extends AbstractClient {
   public void sendRead(ActorRef replica, int index) {
     log("requesting READ (" + index + ") to " + replica.path().name());
     // Cancel any previous outstanding read for this index before rescheduling
-    // (see slide 23: never reschedule onto a live Cancellable).
     Pending old = pendingReads.remove(index);
     if (old != null) {
       old.timeout.cancel();
@@ -72,16 +72,48 @@ public class Client extends AbstractClient {
     pendingWrites.put(index, new Pending(reqId, c, replica));
   }
 
-  @Override
-  public final Receive createReceive() {
-    return createBaseReceiveBuilder()
-        // TODO add your message handlers here .match(, )
-        .build();
+  private void onReadResult(ReadResult r) {
+    Pending p = pendingReads.remove(r.index);
+    if (p == null) {
+      return; // already answered or timed out
+    }
+    p.timeout.cancel();
+    callbackOnReadResult(r);
   }
 
-  // A request awaiting an answer from the system.
-  private record Pending(long reqId, Cancellable timeout, ActorRef replica) {
+  private void onWriteResult(WriteResult r) {
+    Pending p = pendingWrites.remove(r.index);
+    if (p == null) {
+      return;
+    }
+    p.timeout.cancel();
+    callbackOnWriteResult(r);
+  }
 
+  private void onReadTimeoutMsg(ReadTimeoutMsg t) {
+    Pending p = pendingReads.get(t.index);
+    if (p == null || p.reqId != t.reqId) {
+      return; // stale firing for an already-answered request
+    }
+    pendingReads.remove(t.index);
+    callbackOnReadTimeout(new ReadTimeout(getSelf(), t.replica, t.index));
+  }
+
+  private void onWriteTimeoutMsg(WriteTimeoutMsg t) {
+    Pending p = pendingWrites.get(t.index);
+    if (p == null || p.reqId != t.reqId) {
+      return;
+    }
+    pendingWrites.remove(t.index);
+    callbackOnWriteTimeout(new WriteTimeout(getSelf(), t.replica, t.index, t.value));
+  }
+
+  @Override
+  public final Receive createReceive() {
+    return createBaseReceiveBuilder().match(ReadResult.class, this::onReadResult)
+        .match(WriteResult.class, this::onWriteResult)
+        .match(ReadTimeoutMsg.class, this::onReadTimeoutMsg)
+        .match(WriteTimeoutMsg.class, this::onWriteTimeoutMsg).build();
   }
 
   private record ReadTimeoutMsg(long reqId, ActorRef replica, int index) implements Serializable {
@@ -92,4 +124,10 @@ public class Client extends AbstractClient {
       Serializable {
 
   }
+
+  // A request awaiting an answer from the system.
+  private record Pending(long reqId, Cancellable timeout, ActorRef replica) {
+
+  }
+
 }
