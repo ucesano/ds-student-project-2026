@@ -114,6 +114,24 @@ public class Replica extends AbstractReplica {
     return false;
   }
 
+  private int quorum() {
+    return n / 2 + 1;
+  }
+
+  private void broadcast(Serializable msg) {
+    for (ActorRef r : group.values()) {
+      this.tell(msg, r);
+    }
+  }
+
+  private void broadcastToOthers(Serializable msg) {
+    for (Map.Entry<Integer, ActorRef> e : group.entrySet()) {
+      if (e.getKey() != this.id) {
+        this.tell(msg, e.getValue());
+      }
+    }
+  }
+
   @Override
   public void initSystem(InitSystem sysInit) {
     this.group = sysInit.group();
