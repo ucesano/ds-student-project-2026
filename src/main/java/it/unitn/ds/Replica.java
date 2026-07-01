@@ -152,7 +152,11 @@ public class Replica extends AbstractReplica {
     record WriteOkTimeout(UpdateId id) implements Serializable {}
 
     /** Ring election message carrying the candidates and their latest updates. */
-    record Election(int initiatorId,int crashedCoordinatorId,List<Candidate> candidates,boolean decided,int winnerId) implements Serializable {}
+    record Election(int initiatorId,int crashedCoordinatorId,List<Candidate> candidates,boolean decided,int winnerId) implements Serializable {
+        Election {
+            candidates = List.copyOf(candidates); // messages must be immutable
+        }
+    }
 
     /** Acknowledgment of an ELECTION message to its forwarder. */
     static class ElectionAck implements Serializable {}
@@ -164,7 +168,11 @@ public class Replica extends AbstractReplica {
     static class ElectionTimeout implements Serializable {}
 
     /** New coordinator announcement, carrying any updates needed to converge. */
-    record Synchronization(int newCoordinatorId,int newEpoch,List<Update> history) implements Serializable {}
+    record Synchronization(int newCoordinatorId,int newEpoch,List<Update> history) implements Serializable {
+        Synchronization {
+            history = List.copyOf(history); // messages must be immutable
+        }
+    }
 
     // =================================================================================
     // Local state
@@ -186,8 +194,11 @@ public class Replica extends AbstractReplica {
     private final Map<UpdateId, Update> proposed = new HashMap<>();
     // Updates already applied to local state (also serves as the dedup set / history).
     private final Map<UpdateId, Update> history = new HashMap<>();
-    // Most recent update applied (used by the election protocol).
-    private UpdateId lastUpdate = null;
+    // Most recent update OBSERVED (proposed or applied). The election protocol
+    // compares candidates on this value: an update ACKed by a quorum survives a
+    // coordinator crash because, thanks to FIFO channels, the most-observed
+    // replica has seen every update up to (and including) it.
+    private UpdateId lastObserved = null;
 
     // Coordinator-side quorum tracking: distinct ackers per update.
     private final Map<UpdateId, Set<ActorRef>> ackers = new HashMap<>();
@@ -213,6 +224,10 @@ public class Replica extends AbstractReplica {
     private int activeInitiator = -1;          // highest initiator id we are forwarding
     private UpdateId frozenLastUpdate = null;  // Hint 1: frozen while participating
     private final Set<Integer> knownCrashed = new HashSet<>();
+    // Coordinators for which callbackOnElectionStarted has already fired: the
+    // callback must be invoked at most once per replica per crashed coordinator,
+    // even if the election times out and is restarted.
+    private final Set<Integer> electionNotified = new HashSet<>();
     private Election electionInFlight = null;  // last ELECTION we forwarded (for retries)
     private int electionAckTarget = -1;
     private boolean awaitingElectionAck = false;
@@ -354,6 +369,35 @@ public class Replica extends AbstractReplica {
         return false;
     }
 
+    /**
+     * Coordinator-side crash trigger for Update / WriteOK: instead of crashing on
+     * message reception, the coordinator crashes in the middle of a broadcast
+     * (partial dissemination).
+     */
+    private boolean sendSideCrashTriggered(AbstractReplica.Crash.Type type) {
+        if (!isCoordinator || pendingCrash == null || pendingCrash.type != type) {
+            return false;
+        }
+        crashCounter++;
+        return crashCounter >= pendingCrash.after_n_messages_of_type;
+    }
+
+    /** Emulates a crash mid-broadcast: the message reaches only a strict subset
+     *  (less than a quorum) of the other replicas, then the sender dies. */
+    private void broadcastPartiallyThenCrash(Serializable msg) {
+        int sent = 0;
+        int toSend = (n - 1) / 2; // strictly less than a quorum
+        for (int rid : ringIds) {
+            if (rid == this.id || sent >= toSend) {
+                continue;
+            }
+            this.tell(msg, group.get(rid));
+            sent++;
+        }
+        log("CRASHED");
+        goCrashed();
+    }
+
     // =================================================================================
     // Helpers
     // =================================================================================
@@ -386,9 +430,7 @@ public class Replica extends AbstractReplica {
         cancel(writeOkTimers.remove(u.id));
         positions[u.index] = u.value;
         history.put(u.id, u);
-        if (lastUpdate == null || u.id.compareTo(lastUpdate) > 0) {
-            lastUpdate = u.id;
-        }
+        observe(u.id);
         log("applied update " + u.id + " (" + u.index + ", " + u.value + ")");
         callbackOnUpdateApplied(u.index, u.value);
         if (u.originId == this.id && u.client != null) {
@@ -398,13 +440,23 @@ public class Replica extends AbstractReplica {
         }
     }
 
+    private void observe(UpdateId id) {
+        if (lastObserved == null || id.compareTo(lastObserved) > 0) {
+            lastObserved = id;
+        }
+    }
+
     // =================================================================================
     // Read path
     // =================================================================================
 
     private void onClientRead(ClientRead m) {
         debug("READ (" + m.index + ") from client " + m.client.path().name());
-        this.tell(new ReadResult(true, m.index, positions[m.index], this.id), m.client);
+        if (m.index < 0 || m.index >= positions.length) {
+            this.tell(new ReadResult(false, m.index, null, this.id), m.client);
+        } else {
+            this.tell(new ReadResult(true, m.index, positions[m.index], this.id), m.client);
+        }
     }
 
     // =================================================================================
@@ -413,6 +465,13 @@ public class Replica extends AbstractReplica {
 
     private void onClientWrite(ClientWrite m) {
         debug("WRITE (" + m.index + ", " + m.value + ") from client " + m.client.path().name());
+        if (group == null) {
+            return; // not initialized yet: the client will time out and retry
+        }
+        if (m.index < 0 || m.index >= positions.length) {
+            this.tell(new WriteResult(false, m.index, m.value, this.id), m.client);
+            return;
+        }
         long reqId = ++writeReqCounter;
         pendingWrites.put(reqId, new PendingWrite(reqId, m.client, m.index, m.value));
         if (participating) {
@@ -450,19 +509,32 @@ public class Replica extends AbstractReplica {
         Update u = new Update(uid, index, value, originId, client, reqId);
         proposed.put(uid, u);
         ackers.put(uid, new HashSet<>());
+        observe(uid);
         debug("coordinator proposing update " + uid + " (" + index + ", " + value + ")");
+        if (sendSideCrashTriggered(AbstractReplica.Crash.Type.Update)) {
+            broadcastPartiallyThenCrash(u); // crash "during the broadcast of an UPDATE"
+            return;
+        }
         broadcast(u);
     }
 
     /** Every replica: store the proposed update and acknowledge the coordinator. */
     private void onUpdate(Update u) {
-        if (participating) {
-            return; // ignore stragglers while electing
+        if (group == null || participating) {
+            return; // not initialized / ignore stragglers while electing
         }
-        if (crashTriggered(AbstractReplica.Crash.Type.Update)) {
+        if (u.id.epoch != this.epoch) {
+            // Stale update from a dead coordinator, delivered after the
+            // synchronization of a newer epoch: it was either completed by the
+            // new coordinator or safely discarded. Accepting it would arm a
+            // WRITEOK timeout that falsely accuses the new coordinator.
+            return;
+        }
+        if (!isCoordinator && crashTriggered(AbstractReplica.Crash.Type.Update)) {
             return; // crash "after receiving an UPDATE": do not ACK
         }
         proposed.put(u.id, u);
+        observe(u.id);
         this.tell(new Ack(u.id), getSender());
         if (u.originId == this.id) {
             PendingWrite pw = pendingWrites.get(u.reqId);
@@ -491,14 +563,18 @@ public class Replica extends AbstractReplica {
             writeOkSent.add(a.id);
             ackers.remove(a.id);
             debug("quorum reached for " + a.id + ", broadcasting WRITEOK");
+            if (sendSideCrashTriggered(AbstractReplica.Crash.Type.WriteOK)) {
+                broadcastPartiallyThenCrash(new WriteOk(a.id)); // crash "during the dissemination of WRITEOK"
+                return;
+            }
             broadcast(new WriteOk(a.id));
         }
     }
 
     /** Every replica: apply the update (once) and, if origin, answer the client. */
     private void onWriteOk(WriteOk w) {
-        if (crashTriggered(AbstractReplica.Crash.Type.WriteOK)) {
-            return; // crash during/after WRITEOK dissemination
+        if (!isCoordinator && crashTriggered(AbstractReplica.Crash.Type.WriteOK)) {
+            return; // crash upon receiving a WRITEOK: do not apply
         }
         Update u = proposed.get(w.id);
         if (u == null) {
@@ -541,7 +617,13 @@ public class Replica extends AbstractReplica {
     }
 
     private void onHeartbeat(Heartbeat h) {
-        if (isCoordinator || participating) {
+        if (isCoordinator) {
+            return;
+        }
+        if (crashTriggered(AbstractReplica.Crash.Type.Heartbeat)) {
+            return; // silent crash after receiving N heartbeats
+        }
+        if (participating) {
             return;
         }
         resetHeartbeatTimeout();
@@ -557,8 +639,8 @@ public class Replica extends AbstractReplica {
 
     private void onForwardTimeout(ForwardTimeout t) {
         forwardTimers.remove(t.reqId);
-        if (crashed || participating) {
-            return;
+        if (crashed || participating || isCoordinator) {
+            return; // isCoordinator: stale timer from before we won the election
         }
         PendingWrite pw = pendingWrites.get(t.reqId);
         if (pw == null || pw.assignedId != null) {
@@ -570,7 +652,7 @@ public class Replica extends AbstractReplica {
 
     private void onWriteOkTimeout(WriteOkTimeout t) {
         writeOkTimers.remove(t.id);
-        if (crashed || participating) {
+        if (crashed || participating || isCoordinator) {
             return;
         }
         if (history.containsKey(t.id) || !proposed.containsKey(t.id)) {
@@ -605,15 +687,18 @@ public class Replica extends AbstractReplica {
         cancel(heartbeatTimeoutTimer);
         heartbeatTimeoutTimer = null;
         knownCrashed.add(crashedCoord);
-        frozenLastUpdate = lastUpdate; //  freeze our "most recent update"
-        callbackOnElectionStarted(crashedCoord);
+        frozenLastUpdate = lastObserved; // Hint 1: freeze our "most recent update"
+        if (electionNotified.add(crashedCoord)) {
+            // at most once per crashed coordinator, even across election restarts
+            callbackOnElectionStarted(crashedCoord);
+        }
         cancel(electionGlobalTimer);
         electionGlobalTimer = schedule(electionGlobalTimeoutDelay(), new ElectionTimeout());
     }
 
     /** Begin a fresh election because we suspect the current coordinator. */
     private void startElection() {
-        if (crashed || participating) {
+        if (crashed || participating || isCoordinator) {
             return;
         }
         enterElection(coordinatorId);
@@ -642,20 +727,16 @@ public class Replica extends AbstractReplica {
     }
 
     private void onElection(Election e) {
-        if (crashed) {
-          return;
-        }
         if (crashTriggered(AbstractReplica.Crash.Type.Election)) {
           return; // crash while an election is in progress: do not ack nor forward,
                   // so our predecessor's ElectionAck timeout skips us in the ring
         }
-        // Always acknowledge the forwarder so it does not skip us.
+        // Always acknowledge the forwarder BEFORE any guard: we are alive, so it
+        // must not mark us as crashed, even if we then discard the message.
         this.tell(new ElectionAck(), getSender());
-        if (crashed) {
-            return;
-        }
-        // Stale election about a coordinator we have already replaced.
-        if (!participating && coordinatorId != e.crashedCoordinatorId) {
+        // Stale election about a coordinator we have already replaced: drop it.
+        // The message dies here, which also stops decided-loops of old rounds.
+        if (coordinatorId != e.crashedCoordinatorId) {
             return;
         }
         if (!participating) {
@@ -672,6 +753,14 @@ public class Replica extends AbstractReplica {
                 if (!(isCoordinator && coordinatorId == this.id)) {
                     declareVictory();
                 }
+            } else if (knownCrashed.contains(e.winnerId)) {
+                // The named winner died before claiming victory: this round can
+                // never complete, so restart instead of looping the message.
+                participating = false;
+                awaitingElectionAck = false;
+                electionInFlight = null;
+                cancel(electionAckTimer);
+                startElection();
             } else {
                 sendElectionToSuccessor(e);
             }
@@ -729,10 +818,12 @@ public class Replica extends AbstractReplica {
         if (crashed || !participating) {
             return;
         }
-        // The election did not converge (e.g. the best candidate crashed): restart it.
+        // The election did not converge (e.g. the best candidate crashed after
+        // being named winner): restart it from scratch (Hint 2, termination).
         log("election timed out, restarting");
         participating = false;
         awaitingElectionAck = false;
+        electionInFlight = null;
         cancel(electionAckTimer);
         startElection();
     }
@@ -779,6 +870,7 @@ public class Replica extends AbstractReplica {
     private void declareVictory() {
         participating = false;
         awaitingElectionAck = false;
+        electionInFlight = null;
         cancel(electionAckTimer);
         cancel(electionGlobalTimer);
 
@@ -794,8 +886,10 @@ public class Replica extends AbstractReplica {
         }
         proposed.clear();
 
-        // Open a new epoch.
-        int base = (lastUpdate == null) ? 0 : lastUpdate.epoch;
+        // Open a new epoch, strictly greater than every epoch we have ever seen:
+        // this.epoch covers coordinators that committed nothing (no update carries
+        // their epoch), lastObserved covers updates of coordinators we outlived.
+        int base = Math.max(this.epoch, (lastObserved == null) ? 0 : lastObserved.epoch);
         this.epoch = base + 1;
         this.nextSeq = 0;
 
@@ -808,20 +902,22 @@ public class Replica extends AbstractReplica {
 
         startHeartbeatBeating();
 
-        // Resume client writes that were waiting for a coordinator.
+        // Resume client writes that were waiting for a coordinator. Cancel their
+        // forward timers first: a stale ForwardTimeout must not fire against us.
         for (PendingWrite pw : new ArrayList<>(pendingWrites.values())) {
             if (pw.assignedId == null) {
+                cancel(forwardTimers.remove(pw.reqId));
                 coordinatorBeginUpdate(pw.client, this.id, pw.index, pw.value, pw.reqId);
             }
         }
     }
 
     private void onSynchronization(Synchronization s) {
-        if (crashed) {
-            return;
-        }
+        boolean alreadyKnown = (coordinatorId == s.newCoordinatorId && epoch == s.newEpoch && !participating);
+
         participating = false;
         awaitingElectionAck = false;
+        electionInFlight = null;
         cancel(electionAckTimer);
         cancel(electionGlobalTimer);
 
@@ -830,8 +926,12 @@ public class Replica extends AbstractReplica {
         this.epoch = s.newEpoch;
         this.nextSeq = 0;
 
-        // Converge to the new coordinator's state.
+        // Converge to the new coordinator's state. Updates of the old epoch that
+        // the new coordinator did not complete are discarded: no correct replica
+        // can have applied them (they never got a WRITEOK the winner missed).
         proposed.clear();
+        writeOkTimers.values().forEach(Replica::cancel);
+        writeOkTimers.clear();
         List<Update> incoming = new ArrayList<>(s.history);
         incoming.sort(Comparator.comparing(x -> x.id));
         for (Update u : incoming) {
@@ -839,7 +939,11 @@ public class Replica extends AbstractReplica {
         }
 
         log("synchronized with new coordinator " + s.newCoordinatorId + " (epoch " + epoch + ")");
-        callbackOnCoordinatorElected(s.newCoordinatorId);
+        if (!alreadyKnown) {
+            // duplicate SYNCHRONIZATION (two elections converged on the same
+            // winner): converge state above but do not re-announce
+            callbackOnCoordinatorElected(s.newCoordinatorId);
+        }
 
         startHeartbeatMonitoring();
 

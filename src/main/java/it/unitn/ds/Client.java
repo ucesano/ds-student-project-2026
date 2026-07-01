@@ -5,7 +5,10 @@ import akka.actor.Cancellable;
 import akka.actor.Props;
 
 import java.io.Serializable;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -21,10 +24,13 @@ public class Client extends AbstractClient {
     // A request awaiting an answer from the system.
     private record Pending(long reqId,Cancellable timeout,ActorRef replica) {}
 
-    // Outstanding requests, keyed by the position index they target. In every
-    // tested scenario a client has at most one in-flight request per index.
-    private final Map<Integer, Pending> pendingReads = new HashMap<>();
-    private final Map<Integer, Pending> pendingWrites = new HashMap<>();
+    // Outstanding requests, keyed by the position index they target. Several
+    // requests may be in flight for the same index: results do not carry a
+    // request id, so they are matched to the OLDEST pending request (FIFO).
+    // This is sound because a client interacts with one replica and both the
+    // replica's reads and the committed writes are answered in request order.
+    private final Map<Integer, Deque<Pending>> pendingReads = new HashMap<>();
+    private final Map<Integer, Deque<Pending>> pendingWrites = new HashMap<>();
     private long reqCounter = 0;
 
     Client(long readTimeoutDelay, long writeTimeoutDelay, Optional<ActorRef> defaultTargetReplica, Optional<ActorRef> listener) {
@@ -60,68 +66,72 @@ public class Client extends AbstractClient {
     @Override
     public void sendRead(ActorRef replica, int index) {
         log("requesting READ (" + index + ") to " + replica.path().name());
-        // Cancel any previous outstanding read for this index before rescheduling
-        Pending old = pendingReads.remove(index);
-        if (old != null) {
-            old.timeout.cancel();
-        }
         long reqId = ++reqCounter;
         replica.tell(new Replica.ClientRead(getSelf(), index), getSelf());
         Cancellable c = schedule(getReadTimeoutDelay(), new ReadTimeoutMsg(reqId, replica, index));
-        pendingReads.put(index, new Pending(reqId, c, replica));
+        pendingReads.computeIfAbsent(index, k -> new ArrayDeque<>()).addLast(new Pending(reqId, c, replica));
     }
 
     @Override
     public void sendWrite(ActorRef replica, int index, int value) {
         log("requesting WRITE (" + index + ", " + value + ") to " + replica.path().name());
-        Pending old = pendingWrites.remove(index);
-        if (old != null) {
-            old.timeout.cancel();
-        }
         long reqId = ++reqCounter;
         replica.tell(new Replica.ClientWrite(getSelf(), index, value), getSelf());
         Cancellable c = schedule(getWriteTimeoutDelay(), new WriteTimeoutMsg(reqId, replica, index, value));
-        pendingWrites.put(index, new Pending(reqId, c, replica));
+        pendingWrites.computeIfAbsent(index, k -> new ArrayDeque<>()).addLast(new Pending(reqId, c, replica));
     }
 
     // =================================================================================
     // Receiving answers
     // =================================================================================
 
-    private void onReadResult(ReadResult r) {
-        Pending p = pendingReads.remove(r.index);
-        if (p == null) {
-            return; // already answered or timed out
+    /** Pops the oldest pending request for {@code index}, cancelling its timeout. */
+    private static boolean settleOldest(Map<Integer, Deque<Pending>> pending, int index) {
+        Deque<Pending> queue = pending.get(index);
+        if (queue == null || queue.isEmpty()) {
+            return false; // already answered or timed out
         }
-        p.timeout.cancel();
-        callbackOnReadResult(r);
+        queue.pollFirst().timeout.cancel();
+        return true;
+    }
+
+    /** Removes the pending request with {@code reqId}, if it is still pending. */
+    private static boolean settleById(Map<Integer, Deque<Pending>> pending, int index, long reqId) {
+        Deque<Pending> queue = pending.get(index);
+        if (queue == null) {
+            return false;
+        }
+        for (Iterator<Pending> it = queue.iterator(); it.hasNext();) {
+            if (it.next().reqId == reqId) {
+                it.remove();
+                return true;
+            }
+        }
+        return false; // stale firing for an already-answered request
+    }
+
+    private void onReadResult(ReadResult r) {
+        if (settleOldest(pendingReads, r.index)) {
+            callbackOnReadResult(r);
+        }
     }
 
     private void onWriteResult(WriteResult r) {
-        Pending p = pendingWrites.remove(r.index);
-        if (p == null) {
-            return;
+        if (settleOldest(pendingWrites, r.index)) {
+            callbackOnWriteResult(r);
         }
-        p.timeout.cancel();
-        callbackOnWriteResult(r);
     }
 
     private void onReadTimeoutMsg(ReadTimeoutMsg t) {
-        Pending p = pendingReads.get(t.index);
-        if (p == null || p.reqId != t.reqId) {
-            return; // stale firing for an already-answered request
+        if (settleById(pendingReads, t.index, t.reqId)) {
+            callbackOnReadTimeout(new ReadTimeout(getSelf(), t.replica, t.index));
         }
-        pendingReads.remove(t.index);
-        callbackOnReadTimeout(new ReadTimeout(getSelf(), t.replica, t.index));
     }
 
     private void onWriteTimeoutMsg(WriteTimeoutMsg t) {
-        Pending p = pendingWrites.get(t.index);
-        if (p == null || p.reqId != t.reqId) {
-            return;
+        if (settleById(pendingWrites, t.index, t.reqId)) {
+            callbackOnWriteTimeout(new WriteTimeout(getSelf(), t.replica, t.index, t.value));
         }
-        pendingWrites.remove(t.index);
-        callbackOnWriteTimeout(new WriteTimeout(getSelf(), t.replica, t.index, t.value));
     }
 
     @Override
