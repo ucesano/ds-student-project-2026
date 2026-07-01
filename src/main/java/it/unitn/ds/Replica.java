@@ -485,11 +485,15 @@ public class Replica extends AbstractReplica {
   }
 
   private void onElection(Election e) {
-    // Always acknowledge the forwarder so it does not skip us.
-    this.tell(new ElectionAck(), getSender());
     if (crashed) {
       return;
     }
+    if (crashTriggered(AbstractReplica.Crash.Type.Election)) {
+      return; // crash while an election is in progress: do not ack nor forward,
+      // so our predecessor's ElectionAck timeout skips us in the ring
+    }
+    // Always acknowledge the forwarder so it does not skip us.
+    this.tell(new ElectionAck(), getSender());
     // Stale election about a coordinator we have already replaced.
     if (!participating && coordinatorId != e.crashedCoordinatorId) {
       return;
