@@ -47,3 +47,9 @@ gradle-app.setting
 
 # # Work around https://youtrack.jetbrains.com/issue/IDEA-116898
 # gradle/wrapper/gradle-wrapper.properties
+
+# LaTeX
+report/*.synctex.gz
+report/*.log
+report/*.aux
+report/*.out
